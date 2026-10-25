@@ -364,7 +364,7 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 		if flow != "" {
 			liveClients = applyClientFlow(clients, flow)
 		}
-		public := coreOwnedTLS(in, users)
+		public := coreOwnedTLS(in, users) || udpInbound(proto)
 		var listenHosts []string
 		var listenPort int
 		if public {
@@ -411,27 +411,22 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 			item["protocol"] = "trojan"
 			item["settings"] = map[string]any{"clients": trojanUsers}
 		case "shadowsocks":
-			method := settingString(in.SettingsJSON, "ss_method")
-			if method == "" {
-				method = "aes-128-gcm"
-			}
-			ssUsers := make([]map[string]string, 0, len(granted))
-			for _, u := range granted {
-				if _, pass, ok := socksIdentity(u); ok {
-					ssUsers = append(ssUsers, map[string]string{"password": pass, "email": u.ID, "method": method})
-				}
-			}
-			if len(ssUsers) == 0 {
+			_, ssSettings, ok := ssXrayClients(in, granted)
+			if !ok {
 				continue
 			}
 			item["protocol"] = "shadowsocks"
-			item["settings"] = map[string]any{"method": method, "clients": ssUsers}
+			item["settings"] = ssSettings
 		case "http":
-			if len(accounts) == 0 {
+			httpAccounts := make([]map[string]string, 0, len(granted))
+			for _, u := range granted {
+				httpAccounts = append(httpAccounts, proxyAccounts(u)...)
+			}
+			if len(httpAccounts) == 0 {
 				continue
 			}
 			item["protocol"] = "http"
-			item["settings"] = map[string]any{"accounts": accounts}
+			item["settings"] = map[string]any{"accounts": httpAccounts}
 		case "socks":
 			if len(accounts) == 0 {
 				continue
@@ -450,7 +445,7 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 			cloned["tag"] = useTag
 			cloned["listen"] = host
 			cloned["port"] = listenPort
-			if !identityFront(in, users) {
+			if proto != "shadowsocks" && !identityFront(in, users) {
 				stream := xrayStreamSettings(in)
 				if !public {
 					stream = enableXrayProxyProtocol(stream)
@@ -762,7 +757,7 @@ func xrayOutboundItem(row OutboundSpec, tag string) map[string]any {
 	case "shadowsocks":
 		method := s.SSMethod
 		if method == "" {
-			method = "aes-128-gcm"
+			method = "2022-blake3-aes-128-gcm"
 		}
 		item["settings"] = map[string]any{"servers": []map[string]any{{
 			"address": s.Address, "port": s.Port, "password": s.Password, "method": method,

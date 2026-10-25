@@ -1,8 +1,10 @@
 package coreadapter
 
 import (
+	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSnapshotAckKeepsBytesAfterCapture(t *testing.T) {
@@ -169,12 +171,89 @@ func TestWSRequestURLKeepsEscapedPath(t *testing.T) {
 	}
 }
 
+func TestHTTPIdentityFrontAndUsernameLogin(t *testing.T) {
+	if !identityFront(InboundSpec{Protocol: "http"}, nil) {
+		t.Fatal("http inbound should use identity front")
+	}
+	p := newPolicyEngine()
+	p.sync([]UserSpec{{ID: "u1", UUID: "alice-id", Username: "免流", Password: "pw"}}, nil)
+	if _, ok := p.lookup("免流", "pw"); !ok {
+		t.Fatal("username login")
+	}
+	if _, ok := p.lookup("alice-id", "pw"); !ok {
+		t.Fatal("uuid login")
+	}
+	if _, ok := p.lookup("免流", "wrong"); ok {
+		t.Fatal("wrong password")
+	}
+}
+
 func TestHopTLSServerNameDefaultsToHost(t *testing.T) {
 	if hopTLSServerName(egressHop{SNI: "audit.test", Addr: "localhost:443"}) != "audit.test" {
 		t.Fatal("explicit sni")
 	}
 	if hopTLSServerName(egressHop{Addr: "localhost:8443"}) != "localhost" {
 		t.Fatal("default host")
+	}
+}
+
+func TestSpliceFrontDropRemovesConn(t *testing.T) {
+	front := &spliceFront{}
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	front.track(a)
+	front.track(b)
+	if n := front.tracked(); n != 2 {
+		t.Fatalf("tracked %d", n)
+	}
+	front.drop(a)
+	if n := front.tracked(); n != 1 {
+		t.Fatalf("after drop a %d", n)
+	}
+	front.drop(a)
+	if n := front.tracked(); n != 1 {
+		t.Fatalf("double drop %d", n)
+	}
+	front.drop(b)
+	if n := front.tracked(); n != 0 {
+		t.Fatalf("empty %d", n)
+	}
+}
+
+func TestSpliceFrontSpawnTrackedDropsOnExit(t *testing.T) {
+	front := &spliceFront{}
+	a, b := net.Pipe()
+	defer b.Close()
+	started := make(chan struct{})
+	done := make(chan struct{})
+	front.spawnTracked(a, func() {
+		close(started)
+		defer close(done)
+		defer a.Close()
+		buf := make([]byte, 1)
+		_, _ = a.Read(buf)
+	})
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not start")
+	}
+	if n := front.tracked(); n != 1 {
+		t.Fatalf("during session %d", n)
+	}
+	_ = b.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler stuck")
+	}
+	deadline := time.Now().Add(time.Second)
+	for front.tracked() != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := front.tracked(); n != 0 {
+		t.Fatalf("after session %d", n)
 	}
 }
 

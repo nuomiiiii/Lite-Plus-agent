@@ -508,6 +508,24 @@ func TestSingBoxSOCKSMapsUsername(t *testing.T) {
 	}
 }
 
+func TestSingBoxOutboundMapsShadowsocksMethod(t *testing.T) {
+	outbounds := singBoxOutbounds([]OutboundSpec{{
+		Protocol: "shadowsocks", Enabled: true, SettingsJSON: `{"ss_method":"aes-128-gcm"}`,
+	}})
+	if method := outbounds[len(outbounds)-1]["method"]; method != "aes-128-gcm" {
+		t.Fatalf("method=%v", method)
+	}
+}
+
+func TestSingBoxOutboundDefaultsShadowsocksMethod(t *testing.T) {
+	outbounds := singBoxOutbounds([]OutboundSpec{{
+		Protocol: "shadowsocks", Enabled: true, SettingsJSON: `{"password":"x"}`,
+	}})
+	if method := outbounds[len(outbounds)-1]["method"]; method != "2022-blake3-aes-128-gcm" {
+		t.Fatalf("method=%v", method)
+	}
+}
+
 func singBoxTypedOutbounds(t *testing.T, raw []byte, typ string) []map[string]any {
 	t.Helper()
 	var cfg struct {
@@ -595,5 +613,97 @@ func TestSingBoxOutboundAppliesRealityPublicKey(t *testing.T) {
 	}
 	if !strings.Contains(text, `"reality"`) {
 		t.Fatalf("missing reality block: %s", text)
+	}
+}
+
+func TestXraySSConfigUsesPasswordAndMethod(t *testing.T) {
+	c := newXrayCore()
+	c.users = []UserSpec{{
+		ID: "u1", UUID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", Username: "免流", Password: "secret",
+	}}
+	c.inbounds = []InboundSpec{{
+		ID: "ss1", Listen: "127.0.0.1", Port: 8388, Protocol: "shadowsocks",
+		SettingsJSON: `{"ss_method":"aes-128-gcm","transport":"tcp","security":"none"}`,
+		StreamJSON:   `{"network":"tcp","security":"none"}`,
+	}}
+	raw, _, fronts, err := c.buildConfig(c.users, c.inbounds, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fronts) != 0 {
+		t.Fatalf("ss must listen on the core, fronts=%+v", fronts)
+	}
+	text := string(raw)
+	for _, part := range []string{
+		`"protocol":"shadowsocks"`,
+		`"password":"secret"`,
+		`"method":"aes-128-gcm"`,
+		`"network":"tcp,udp"`,
+	} {
+		if !strings.Contains(text, part) {
+			t.Fatalf("missing %s in %s", part, text)
+		}
+	}
+	if strings.Contains(text, "acceptProxyProtocol") || strings.Contains(text, "proxy_protocol") {
+		t.Fatalf("ss must not use proxy protocol: %s", text)
+	}
+	if strings.Contains(text, `"streamSettings"`) {
+		t.Fatalf("ss must not wrap stream settings: %s", text)
+	}
+}
+
+func TestSingBoxSSConfigNoProxyProtocol(t *testing.T) {
+	c := newSingBoxCore()
+	c.users = []UserSpec{{
+		ID: "u1", UUID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", Password: "secret",
+	}}
+	c.inbounds = []InboundSpec{{
+		ID: "ss1", Listen: "127.0.0.1", Port: 8388, Protocol: "shadowsocks",
+		SettingsJSON: `{"ss_method":"aes-128-gcm"}`,
+	}}
+	raw, _, fronts, err := c.buildConfig(c.users, c.inbounds, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fronts) != 0 {
+		t.Fatalf("ss must listen on the core, fronts=%+v", fronts)
+	}
+	text := string(raw)
+	for _, part := range []string{
+		`"type":"shadowsocks"`,
+		`"method":"aes-128-gcm"`,
+		`"password":"secret"`,
+	} {
+		if !strings.Contains(text, part) {
+			t.Fatalf("missing %s in %s", part, text)
+		}
+	}
+	if strings.Contains(text, "proxy_protocol") {
+		t.Fatalf("ss must not use proxy protocol: %s", text)
+	}
+}
+
+func TestXrayHTTPConfigUsesUsernameAndUUID(t *testing.T) {
+	c := newXrayCore()
+	c.users = []UserSpec{{
+		ID: "u1", UUID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", Username: "免流", Password: "secret",
+	}}
+	c.inbounds = []InboundSpec{{
+		ID: "http1", Listen: "127.0.0.1", Port: 8080, Protocol: "http",
+	}}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, part := range []string{
+		`"protocol":"http"`,
+		`"user":"免流"`,
+		`"user":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"`,
+		`"pass":"secret"`,
+	} {
+		if !strings.Contains(text, part) {
+			t.Fatalf("missing %s in %s", part, text)
+		}
 	}
 }

@@ -181,11 +181,12 @@ func (r *Runtime) HandleControl(params any, eventID string) bool {
 	switch cmd.Kind {
 	case "needCSR":
 		var p struct {
-			Domain string `json:"domain"`
-			CertID string `json:"cert_id"`
+			Domain   string   `json:"domain"`
+			CertID   string   `json:"cert_id"`
+			DNSNames []string `json:"dns_names"`
 		}
 		_ = json.Unmarshal(cmd.Payload, &p)
-		_, csr, err := r.certs.GenerateCSR(p.Domain)
+		_, csr, err := r.certs.GenerateCSR(p.Domain, p.DNSNames...)
 		if err != nil {
 			status, lastErr = "failed", err.Error()
 		} else if r.result != nil {
@@ -202,9 +203,16 @@ func (r *Runtime) HandleControl(params any, eventID string) bool {
 		var p struct {
 			Domain   string `json:"domain"`
 			ChainPEM string `json:"chain_pem"`
+			KeyPEM   string `json:"key_pem"`
 		}
 		_ = json.Unmarshal(cmd.Payload, &p)
-		if err := r.certs.SaveChain(p.Domain, p.ChainPEM); err != nil {
+		var err error
+		if strings.TrimSpace(p.KeyPEM) != "" {
+			err = r.certs.SaveChainKey(p.Domain, p.ChainPEM, p.KeyPEM)
+		} else {
+			err = r.certs.SaveChain(p.Domain, p.ChainPEM)
+		}
+		if err != nil {
 			status, lastErr = "failed", err.Error()
 		} else if _, got, err := r.certs.TLSConfig(p.Domain); err == nil {
 			fp = got
@@ -316,6 +324,7 @@ func (r *Runtime) applySnapshot(payload json.RawMessage, keepDeny bool) error {
 		} `json:"routes"`
 		Users []struct {
 			ID           string     `json:"id"`
+			Username     string     `json:"username"`
 			Status       string     `json:"status"`
 			QuotaBytes   int64      `json:"quota_bytes"`
 			UsedBytes    int64      `json:"used_bytes"`
@@ -351,6 +360,7 @@ func (r *Runtime) applySnapshot(payload json.RawMessage, keepDeny bool) error {
 	for _, u := range snap.Users {
 		spec := coreadapter.UserSpec{
 			ID:           u.ID,
+			Username:     strings.TrimSpace(u.Username),
 			QuotaBytes:   u.QuotaBytes,
 			UsedBytes:    u.UsedBytes,
 			RateLimitBps: u.RateLimitBps,

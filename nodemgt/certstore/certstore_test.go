@@ -49,6 +49,58 @@ func TestGenerateCSRUsesRSA2048(t *testing.T) {
 	}
 }
 
+func TestGenerateCSRIncludesWildcardSAN(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, csrPEM, err := store.GenerateCSR("abc.com", "abc.com", "*.abc.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode([]byte(csrPEM))
+	if block == nil {
+		t.Fatal("csr pem")
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if csr.Subject.CommonName != "abc.com" {
+		t.Fatalf("cn %s", csr.Subject.CommonName)
+	}
+	got := map[string]bool{}
+	for _, name := range csr.DNSNames {
+		got[name] = true
+	}
+	if !got["abc.com"] || !got["*.abc.com"] {
+		t.Fatalf("san %v", csr.DNSNames)
+	}
+}
+
+func TestSaveChainKeyAcceptsPushedKey(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPath, keyPath, _ := writePair(t, dir, "abc.com", time.Now().Add(24*time.Hour))
+	chain, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveChainKey("abc.com", string(chain), string(key)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.TLSConfig("abc.com"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writePair(t *testing.T, dir, name string, notAfter time.Time) (certPath, keyPath, fp string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

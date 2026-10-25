@@ -43,6 +43,7 @@ type RouteSpec struct {
 type UserSpec struct {
 	ID            string
 	UUID          string
+	Username      string
 	Password      string
 	QuotaBytes    int64
 	UsedBytes     int64
@@ -165,6 +166,68 @@ func socksIdentity(u UserSpec) (user, pass string, ok bool) {
 		return "", "", false
 	}
 	return user, pass, true
+}
+
+func httpIdentity(u UserSpec) (user, pass string, ok bool) {
+	user = strings.TrimSpace(u.Username)
+	if user == "" {
+		user = strings.TrimSpace(u.UUID)
+	}
+	pass = strings.TrimSpace(u.Password)
+	if pass == "" {
+		pass = strings.TrimSpace(u.UUID)
+	}
+	if user == "" || pass == "" {
+		return "", "", false
+	}
+	return user, pass, true
+}
+
+func proxyAccounts(u UserSpec) []map[string]string {
+	_, pass, ok := socksIdentity(u)
+	if !ok {
+		if _, pass, ok = httpIdentity(u); !ok {
+			return nil
+		}
+	}
+	seen := map[string]bool{}
+	var out []map[string]string
+	add := func(user string) {
+		user = strings.TrimSpace(user)
+		if user == "" || seen[user] {
+			return
+		}
+		seen[user] = true
+		out = append(out, map[string]string{"user": user, "pass": pass})
+	}
+	add(u.Username)
+	add(u.UUID)
+	return out
+}
+
+func proxyAuthUsers(u UserSpec) []map[string]string {
+	accounts := proxyAccounts(u)
+	out := make([]map[string]string, 0, len(accounts))
+	for _, a := range accounts {
+		out = append(out, map[string]string{"username": a["user"], "password": a["pass"]})
+	}
+	return out
+}
+
+func indexLoginNames(u UserSpec, dest map[string]UserSpec) {
+	if dest == nil {
+		return
+	}
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			dest[name] = u
+		}
+	}
+	if user, _, ok := socksIdentity(u); ok {
+		add(user)
+	}
+	add(u.Username)
 }
 
 func vlessUUID(u UserSpec) string {

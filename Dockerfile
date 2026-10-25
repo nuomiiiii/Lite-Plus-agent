@@ -14,6 +14,8 @@ RUN chmod +x /app/Lite-Plus-agent
 # containers still skip binary self-update and layout relocate.
 RUN touch /.lite-plus-agent-container /.lite-agent-container /.komari-agent-container
 
+ENV GODEBUG=disablethp=1
+
 ENTRYPOINT ["/app/Lite-Plus-agent"]
 # 运行时请指定参数
 # Please specify parameters at runtime.

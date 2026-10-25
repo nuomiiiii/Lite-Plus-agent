@@ -848,6 +848,7 @@ if [ "$init_system" = "nixos" ]; then
     echo -e "${CYAN}    WorkingDirectory = \"${target_dir}\";${NC}"
     echo -e "${CYAN}    Restart = \"always\";${NC}"
     echo -e "${CYAN}    User = \"root\";${NC}"
+    echo -e "${CYAN}    Environment = [ \"GODEBUG=disablethp=1\" ];${NC}"
     echo -e "${CYAN}  };${NC}"
     echo -e "${CYAN}};${NC}"
     echo ""
@@ -866,6 +867,8 @@ command="${agent_path}"
 command_args="${agent_args}"
 command_user="root"
 directory="${target_dir}"
+# Keep Go heap off Linux transparent huge pages so idle RSS can return.
+supervise_daemon_args="--env GODEBUG=disablethp=1"
 pidfile="/run/${service_name}.pid"
 retry="SIGTERM/30"
 supervisor=supervise-daemon
@@ -896,6 +899,7 @@ ExecStart=${agent_path} ${agent_args}
 WorkingDirectory=${target_dir}
 Restart=always
 User=root
+Environment=GODEBUG=disablethp=1
 
 [Install]
 WantedBy=multi-user.target
@@ -924,6 +928,7 @@ ARGS="${agent_args}"
 start_service() {
     procd_open_instance
     procd_set_param command \$PROG \$ARGS
+    procd_set_param env GODEBUG=disablethp=1
     procd_set_param respawn
     procd_set_param stdout 1
     procd_set_param stderr 1

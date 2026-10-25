@@ -48,33 +48,92 @@ func Open(dir string) (*Store, error) {
 	return &Store{dir: dir, files: map[string]binding{}}, nil
 }
 
-func (s *Store) GenerateCSR(domain string) (keyPEM, csrPEM string, err error) {
+func fileKey(domain string) string {
+	d := strings.ToLower(strings.TrimSpace(domain))
+	d = strings.TrimSuffix(d, ".")
+	d = strings.TrimPrefix(d, "*.")
+	d = strings.ReplaceAll(d, "*", "_")
+	if d == "" {
+		return "cert"
+	}
+	return d
+}
+
+func uniqueDNS(names []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		n = strings.ToLower(strings.TrimSpace(n))
+		n = strings.TrimSuffix(n, ".")
+		if n == "" {
+			continue
+		}
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	return out
+}
+
+func commonName(names []string) string {
+	for _, n := range names {
+		if !strings.HasPrefix(n, "*.") {
+			return n
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(names[0], "*.")
+}
+
+func (s *Store) GenerateCSR(domain string, names ...string) (keyPEM, csrPEM string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	keyName := fileKey(domain)
+	dnsNames := uniqueDNS(names)
+	if len(dnsNames) == 0 {
+		dnsNames = uniqueDNS([]string{domain})
+	}
+	if len(dnsNames) == 0 {
+		return "", "", fmt.Errorf("domain required")
+	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return "", "", err
 	}
 	keyPEMBytes := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-	tpl := &x509.CertificateRequest{Subject: pkix.Name{CommonName: domain}, DNSNames: []string{domain}}
+	tpl := &x509.CertificateRequest{Subject: pkix.Name{CommonName: commonName(dnsNames)}, DNSNames: dnsNames}
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, tpl, key)
 	if err != nil {
 		return "", "", err
 	}
 	csrPEMBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-	if err := os.WriteFile(filepath.Join(s.dir, domain+".key.next"), keyPEMBytes, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(s.dir, keyName+".key.next"), keyPEMBytes, 0o600); err != nil {
 		return "", "", err
 	}
 	return string(keyPEMBytes), string(csrPEMBytes), nil
 }
 
 func (s *Store) SaveChain(domain, chainPEM string) error {
+	return s.SaveChainKey(domain, chainPEM, "")
+}
+
+func (s *Store) SaveChainKey(domain, chainPEM, keyPEM string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	crtNext := filepath.Join(s.dir, domain+".crt.next")
-	keyNext := filepath.Join(s.dir, domain+".key.next")
-	crtLive := filepath.Join(s.dir, domain+".crt")
-	keyLive := filepath.Join(s.dir, domain+".key")
+	keyName := fileKey(domain)
+	crtNext := filepath.Join(s.dir, keyName+".crt.next")
+	keyNext := filepath.Join(s.dir, keyName+".key.next")
+	crtLive := filepath.Join(s.dir, keyName+".crt")
+	keyLive := filepath.Join(s.dir, keyName+".key")
+	if strings.TrimSpace(keyPEM) != "" {
+		if err := os.WriteFile(keyNext, []byte(keyPEM), 0o600); err != nil {
+			return err
+		}
+	}
 	if err := os.WriteFile(crtNext, []byte(chainPEM), 0o600); err != nil {
 		return err
 	}
@@ -82,12 +141,12 @@ func (s *Store) SaveChain(domain, chainPEM string) error {
 	if _, err := os.Stat(keyNext); err == nil {
 		keyPath = keyNext
 	}
-	keyPEM, err := os.ReadFile(keyPath)
+	keyBytes, err := os.ReadFile(keyPath)
 	if err != nil {
 		_ = os.Remove(crtNext)
 		return err
 	}
-	if _, err := tls.X509KeyPair([]byte(chainPEM), keyPEM); err != nil {
+	if _, err := tls.X509KeyPair([]byte(chainPEM), keyBytes); err != nil {
 		_ = os.Remove(crtNext)
 		return err
 	}
@@ -201,11 +260,12 @@ func (s *Store) PEM(domain string) (certPEM, keyPEM []byte, err error) {
 		keyPEM, err = os.ReadFile(b.KeyPath)
 		return certPEM, keyPEM, err
 	}
-	certPEM, err = os.ReadFile(filepath.Join(s.dir, domain+".crt"))
+	keyName := fileKey(domain)
+	certPEM, err = os.ReadFile(filepath.Join(s.dir, keyName+".crt"))
 	if err != nil {
 		return nil, nil, err
 	}
-	keyPEM, err = os.ReadFile(filepath.Join(s.dir, domain+".key"))
+	keyPEM, err = os.ReadFile(filepath.Join(s.dir, keyName+".key"))
 	return certPEM, keyPEM, err
 }
 

@@ -286,7 +286,7 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 			"listen":      listenAddr,
 			"listen_port": listenPort,
 		}
-		if !identityFront(in, users) {
+		if proto != "shadowsocks" && !identityFront(in, users) {
 			if tls := singBoxTLS(in); tls != nil {
 				item["tls"] = tls
 			}
@@ -298,12 +298,21 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 			}
 		}
 		switch proto {
-		case "socks", "mixed", "http":
+		case "socks", "mixed":
 			authUsers := make([]map[string]string, 0, len(granted))
 			for _, u := range granted {
 				if user, pass, ok := socksIdentity(u); ok {
 					authUsers = append(authUsers, map[string]string{"username": user, "password": pass})
 				}
+			}
+			if len(authUsers) == 0 {
+				continue
+			}
+			item["users"] = authUsers
+		case "http":
+			authUsers := make([]map[string]string, 0, len(granted))
+			for _, u := range granted {
+				authUsers = append(authUsers, proxyAuthUsers(u)...)
 			}
 			if len(authUsers) == 0 {
 				continue
@@ -359,21 +368,13 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 			}
 			item["users"] = tuicUsers
 		case "shadowsocks":
-			method := settingString(in.SettingsJSON, "ss_method")
-			if method == "" {
-				method = "aes-128-gcm"
-			}
-			item["method"] = method
-			ssUsers := make([]map[string]string, 0, len(granted))
-			for _, u := range granted {
-				if _, pass, ok := socksIdentity(u); ok {
-					ssUsers = append(ssUsers, map[string]string{"name": u.ID, "password": pass})
-				}
-			}
-			if len(ssUsers) == 0 {
+			ssItem, ok := ssSingBoxInbound(in, granted)
+			if !ok {
 				continue
 			}
-			item["users"] = ssUsers
+			for key, value := range ssItem {
+				item[key] = value
+			}
 		}
 		listenHosts := []string{listenAddr}
 		if public {
@@ -570,6 +571,11 @@ func singBoxOutbounds(rows []OutboundSpec) []map[string]any {
 				}
 				if pass, _ := settings["password"].(string); pass != "" {
 					item["password"] = pass
+				}
+				if method, _ := settings["ss_method"].(string); method != "" {
+					item["method"] = method
+				} else if strings.EqualFold(row.Protocol, "shadowsocks") {
+					item["method"] = "2022-blake3-aes-128-gcm"
 				}
 				if flow, _ := settings["flow"].(string); flow != "" {
 					item["flow"] = flow
@@ -781,7 +787,7 @@ func firstString(v any) string {
 
 func udpInbound(proto string) bool {
 	switch strings.ToLower(strings.TrimSpace(proto)) {
-	case "hysteria2", "tuic":
+	case "hysteria2", "tuic", "shadowsocks":
 		return true
 	default:
 		return false

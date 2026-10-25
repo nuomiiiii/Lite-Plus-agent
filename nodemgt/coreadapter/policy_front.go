@@ -50,9 +50,39 @@ func (s *spliceFront) close() {
 }
 
 func (s *spliceFront) track(c net.Conn) {
+	if s == nil || c == nil {
+		return
+	}
 	s.mu.Lock()
 	s.conns = append(s.conns, c)
 	s.mu.Unlock()
+}
+
+func (s *spliceFront) drop(c net.Conn) {
+	if s == nil || c == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, x := range s.conns {
+		if x != c {
+			continue
+		}
+		last := len(s.conns) - 1
+		s.conns[i] = s.conns[last]
+		s.conns[last] = nil
+		s.conns = s.conns[:last]
+		return
+	}
+}
+
+func (s *spliceFront) tracked() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.conns)
 }
 
 func (s *spliceFront) spawn(fn func()) {
@@ -61,6 +91,14 @@ func (s *spliceFront) spawn(fn func()) {
 		defer s.wg.Done()
 		fn()
 	}()
+}
+
+func (s *spliceFront) spawnTracked(c net.Conn, fn func()) {
+	s.track(c)
+	s.spawn(func() {
+		defer s.drop(c)
+		fn()
+	})
 }
 
 type egressHop struct {
@@ -155,9 +193,7 @@ func (p *policyEngine) sync(users []UserSpec, denied map[string]struct{}) {
 	p.byLogin = map[string]UserSpec{}
 	p.byUUID = map[string]UserSpec{}
 	for _, u := range users {
-		if user, _, ok := socksIdentity(u); ok {
-			p.byLogin[user] = u
-		}
+		indexLoginNames(u, p.byLogin)
 		if id := vlessUUID(u); id != "" {
 			p.byUUID[strings.ToLower(id)] = u
 		}
@@ -175,9 +211,7 @@ func (p *policyEngine) deny(userID string) {
 	for i := range p.users {
 		if p.users[i].ID == userID {
 			p.users[i].Disabled = true
-			if user, _, ok := socksIdentity(p.users[i]); ok {
-				p.byLogin[user] = p.users[i]
-			}
+			indexLoginNames(p.users[i], p.byLogin)
 		}
 	}
 	p.mu.Unlock()
@@ -440,7 +474,7 @@ func (p *policyEngine) mapStatName(name string) string {
 
 func identityFront(in InboundSpec, users []UserSpec) bool {
 	p := strings.ToLower(strings.TrimSpace(in.Protocol))
-	if p == "" || p == "socks" {
+	if p == "" || p == "socks" || p == "http" {
 		return true
 	}
 	if p != "vless" || coreOwnedTLS(in, users) {
@@ -1109,6 +1143,8 @@ func startPolicyFronts(policy *policyEngine, specs []frontSpec) ([]*spliceFront,
 			go servePolicyExit(front, spec, policy)
 		case spec.Identity && strings.EqualFold(spec.Protocol, "vless"):
 			go serveVLESSFront(front, spec, policy)
+		case spec.Identity && strings.EqualFold(spec.Protocol, "http"):
+			go serveIdentityHTTP(front, spec, policy)
 		case spec.Identity:
 			go serveIdentitySplice(front, spec.Dest, policy)
 		default:
@@ -1125,14 +1161,14 @@ func serveSplice(front *spliceFront, spec frontSpec) {
 		if err != nil {
 			return
 		}
-		front.track(client)
-		front.spawn(func() {
+		front.spawnTracked(client, func() {
 			backend, err := net.DialTimeout("tcp", spec.Dest, 2*time.Second)
 			if err != nil {
 				_ = client.Close()
 				return
 			}
 			front.track(backend)
+			defer front.drop(backend)
 			defer client.Close()
 			defer backend.Close()
 			if spec.ProxyProtocol {
@@ -1152,9 +1188,134 @@ func serveIdentitySplice(front *spliceFront, dest string, policy *policyEngine) 
 		if err != nil {
 			return
 		}
-		front.track(client)
-		front.spawn(func() { handleIdentitySOCKS(front, client, dest, policy) })
+		front.spawnTracked(client, func() { handleIdentitySOCKS(front, client, dest, policy) })
 	}
+}
+
+func serveIdentityHTTP(front *spliceFront, spec frontSpec, policy *policyEngine) {
+	ln := net.Listener(front.ln)
+	if spec.TLS != nil {
+		ln = tls.NewListener(ln, spec.TLS)
+	}
+	for {
+		client, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		front.spawnTracked(client, func() { handleIdentityHTTP(front, client, spec.Dest, policy) })
+	}
+}
+
+func handleIdentityHTTP(front *spliceFront, client net.Conn, dest string, policy *policyEngine) {
+	defer client.Close()
+	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
+	cr := bufio.NewReader(client)
+	req, err := http.ReadRequest(cr)
+	if err != nil {
+		return
+	}
+	user, pass, ok := proxyBasicAuth(req)
+	if !ok {
+		writeProxyStatus(client, http.StatusProxyAuthRequired, map[string]string{"Proxy-Authenticate": `Basic realm="nodemgt"`})
+		return
+	}
+	spec, ok := policy.lookup(user, pass)
+	if !ok {
+		writeProxyStatus(client, http.StatusProxyAuthRequired, map[string]string{"Proxy-Authenticate": `Basic realm="nodemgt"`})
+		return
+	}
+	ip := connClientIP(client)
+	if !policy.holdIP(spec.ID, ip, spec.DeviceLimit) {
+		writeProxyStatus(client, http.StatusForbidden, nil)
+		return
+	}
+	defer policy.releaseIP(spec.ID, ip)
+	sessID := fmt.Sprintf("%s-%d", spec.ID, time.Now().UnixNano())
+	policy.trackSession(&sessions.Session{ID: sessID, UserID: spec.ID, Conn: client})
+	defer policy.sess.Remove(sessID)
+	backend, err := net.DialTimeout("tcp", dest, 2*time.Second)
+	if err != nil {
+		writeProxyStatus(client, http.StatusBadGateway, nil)
+		return
+	}
+	front.track(backend)
+	defer front.drop(backend)
+	defer backend.Close()
+	_ = backend.SetDeadline(time.Now().Add(3 * time.Second))
+	if err := req.WriteProxy(backend); err != nil {
+		return
+	}
+	br := bufio.NewReader(backend)
+	if strings.EqualFold(req.Method, http.MethodConnect) {
+		head, status, err := readHTTPHead(br)
+		if err != nil {
+			return
+		}
+		if _, err := client.Write(head); err != nil {
+			return
+		}
+		if status != http.StatusOK {
+			return
+		}
+	}
+	_ = client.SetDeadline(time.Time{})
+	_ = backend.SetDeadline(time.Time{})
+	splicePolicy(client, backend, cr, br, spec.ID, policy)
+}
+
+func readHTTPHead(r *bufio.Reader) ([]byte, int, error) {
+	var buf []byte
+	tmp := make([]byte, 1)
+	for len(buf) < 8192 {
+		if _, err := io.ReadFull(r, tmp); err != nil {
+			return nil, 0, err
+		}
+		buf = append(buf, tmp[0])
+		if !bytes.HasSuffix(buf, []byte("\r\n\r\n")) {
+			continue
+		}
+		status := string(buf)
+		if i := strings.Index(status, "\r\n"); i > 0 {
+			status = status[:i]
+		}
+		parts := strings.SplitN(status, " ", 3)
+		if len(parts) < 2 {
+			return buf, 0, fmt.Errorf("http status")
+		}
+		code, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return buf, 0, err
+		}
+		return buf, code, nil
+	}
+	return nil, 0, fmt.Errorf("http head")
+}
+
+func proxyBasicAuth(req *http.Request) (user, pass string, ok bool) {
+	if req == nil {
+		return "", "", false
+	}
+	raw := strings.TrimSpace(req.Header.Get("Proxy-Authorization"))
+	const prefix = "Basic "
+	if !strings.HasPrefix(raw, prefix) {
+		return "", "", false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(raw[len(prefix):]))
+	if err != nil {
+		return "", "", false
+	}
+	user, pass, ok = strings.Cut(string(decoded), ":")
+	return strings.TrimSpace(user), pass, ok && strings.TrimSpace(user) != ""
+}
+
+func writeProxyStatus(w io.Writer, status int, extra map[string]string) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "HTTP/1.1 %d %s\r\n", status, http.StatusText(status))
+	for key, value := range extra {
+		fmt.Fprintf(&b, "%s: %s\r\n", key, value)
+	}
+	b.WriteString("Content-Length: 0\r\nConnection: close\r\n\r\n")
+	_, _ = io.WriteString(w, b.String())
 }
 
 func servePolicyExit(front *spliceFront, spec frontSpec, policy *policyEngine) {
@@ -1163,8 +1324,7 @@ func servePolicyExit(front *spliceFront, spec frontSpec, policy *policyEngine) {
 		if err != nil {
 			return
 		}
-		front.track(client)
-		front.spawn(func() { handlePolicyExitSOCKS(front, client, policy, spec.Egress) })
+		front.spawnTracked(client, func() { handlePolicyExitSOCKS(front, client, policy, spec.Egress) })
 	}
 }
 
@@ -1213,6 +1373,7 @@ func handlePolicyExitSOCKS(front *spliceFront, client net.Conn, policy *policyEn
 		return
 	}
 	front.track(backend)
+	defer front.drop(backend)
 	defer backend.Close()
 	if _, err := client.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 		return
@@ -1615,6 +1776,7 @@ func handleIdentitySOCKS(front *spliceFront, client net.Conn, dest string, polic
 		return
 	}
 	front.track(backend)
+	defer front.drop(backend)
 	defer backend.Close()
 	_ = backend.SetDeadline(time.Now().Add(3 * time.Second))
 	br := bufio.NewReader(backend)
@@ -1674,8 +1836,7 @@ func serveVLESSFront(front *spliceFront, spec frontSpec, policy *policyEngine) {
 		if err != nil {
 			return
 		}
-		front.track(client)
-		front.spawn(func() { handleIdentityVLESS(front, client, spec.Dest, policy) })
+		front.spawnTracked(client, func() { handleIdentityVLESS(front, client, spec.Dest, policy) })
 	}
 }
 
@@ -1695,8 +1856,7 @@ func serveVLESSWS(front *spliceFront, ln net.Listener, spec frontSpec, policy *p
 			return
 		}
 		conn := newWSConn(wc)
-		front.track(conn)
-		front.spawn(func() { handleIdentityVLESS(front, conn, spec.Dest, policy) })
+		front.spawnTracked(conn, func() { handleIdentityVLESS(front, conn, spec.Dest, policy) })
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	_ = srv.Serve(ln)
@@ -1726,6 +1886,7 @@ func handleIdentityVLESS(front *spliceFront, client net.Conn, dest string, polic
 		return
 	}
 	front.track(backend)
+	defer front.drop(backend)
 	defer backend.Close()
 	if _, err := backend.Write(header); err != nil {
 		return
