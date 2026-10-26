@@ -19,14 +19,17 @@ type Set struct {
 
 func New() *Set { return &Set{rate: map[string]*Bucket{}} }
 
+// Configure sets a per-user token bucket. bps is bits per second from the
+// panel; the limiter consumes payload bytes, so the bucket rate is bps/8.
 func (s *Set) Configure(userID string, bps int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if bps <= 0 {
+	bytesPerSec := bps / 8
+	if bytesPerSec <= 0 {
 		delete(s.rate, userID)
 		return
 	}
-	s.rate[userID] = &Bucket{rate: float64(bps), burst: float64(bps), tokens: float64(bps), last: time.Now()}
+	s.rate[userID] = &Bucket{rate: float64(bytesPerSec), burst: float64(bytesPerSec), tokens: float64(bytesPerSec), last: time.Now()}
 }
 
 func (s *Set) Allow(userID string, n int) bool {

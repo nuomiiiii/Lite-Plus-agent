@@ -46,12 +46,12 @@ func connClientIP(conn net.Conn) string {
 }
 
 func (g *ipGuard) hold(userID, ip string, limit int) bool {
-	if limit <= 0 {
-		return true
-	}
 	ip = normalizeClientIP(ip)
-	if userID == "" || ip == "" {
-		return false
+	if userID == "" {
+		return limit <= 0
+	}
+	if ip == "" {
+		return limit <= 0
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -64,7 +64,7 @@ func (g *ipGuard) hold(userID, ip string, limit int) bool {
 		byIP[ip]++
 		return true
 	}
-	if len(byIP) >= limit {
+	if limit > 0 && len(byIP) >= limit {
 		return false
 	}
 	byIP[ip] = 1
@@ -94,6 +94,24 @@ func (g *ipGuard) clear(userID string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	delete(g.live, userID)
+}
+
+func (g *ipGuard) liveIPs() map[string][]string {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := map[string][]string{}
+	for userID, byIP := range g.live {
+		for ip, n := range byIP {
+			if n <= 0 || ip == "" {
+				continue
+			}
+			out[userID] = append(out[userID], ip)
+		}
+	}
+	return out
 }
 
 func (p *policyEngine) holdIP(userID, ip string, limit int) bool {

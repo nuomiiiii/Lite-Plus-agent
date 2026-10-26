@@ -767,7 +767,7 @@ func TestSOCKSRateCompletesAndIdleSnapshotEmpty(t *testing.T) {
 		t.Run(core.Name(), func(t *testing.T) {
 			defer core.Stop()
 			port := freePort(t)
-			if err := core.ApplyUsers([]UserSpec{{ID: "u1", UUID: "alice", Password: "pw", RateLimitBps: 1024}}); err != nil {
+			if err := core.ApplyUsers([]UserSpec{{ID: "u1", UUID: "alice", Password: "pw", RateLimitBps: 8192}}); err != nil {
 				t.Fatal(err)
 			}
 			if err := core.Start(context.Background(), []InboundSpec{{

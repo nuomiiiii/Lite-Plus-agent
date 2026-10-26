@@ -46,4 +46,14 @@ func TestIPGuardCountsUniqueIPsNotSessions(t *testing.T) {
 	if !g.hold("u1", "203.0.113.10", 0) {
 		t.Fatal("limit 0 is unlimited")
 	}
+	live := g.liveIPs()["u1"]
+	found := false
+	for _, ip := range live {
+		if ip == "203.0.113.10" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("unlimited still tracks live ip: %v", live)
+	}
 }

@@ -337,6 +337,7 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 	var policyTags []string
 	var skipIP []string
 	var meterTags []string
+	listenTags := map[string][]string{}
 	for i, in := range inbounds {
 		tag := in.ID
 		if tag == "" {
@@ -459,6 +460,9 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 				}
 			}
 			items = append(items, cloned)
+			if in.ID != "" {
+				listenTags[in.ID] = append(listenTags[in.ID], useTag)
+			}
 			if identityFront(in, users) {
 				skipIP = append(skipIP, useTag)
 			}
@@ -475,11 +479,12 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 				net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", listenPort)),
 				proto,
 				users,
+				true,
 			)...)
 		}
 	}
 	obs := xrayOutbounds(outbounds)
-	rules := xrayRouteRules(routes, outbounds)
+	rules := xrayRouteRules(routes, outbounds, listenTags)
 	if len(policyTags) > 0 {
 		var extra []frontSpec
 		var coreIn []map[string]any
@@ -575,7 +580,7 @@ func enableXrayProxyProtocol(stream map[string]any) map[string]any {
 		}
 		hu["acceptProxyProtocol"] = true
 		stream["httpupgradeSettings"] = hu
-	case "grpc", "gun":
+	case "grpc", "gun", "xhttp", "splithttp":
 		sock, _ := stream["sockopt"].(map[string]any)
 		if sock == nil {
 			sock = map[string]any{}
@@ -850,7 +855,7 @@ func outboundStream(transport, security, sni, fingerprint, wsPath, wsHost, grpcS
 	return stream
 }
 
-func xrayRouteRules(routes []RouteSpec, outbounds []OutboundSpec) []map[string]any {
+func xrayRouteRules(routes []RouteSpec, outbounds []OutboundSpec, inboundTags map[string][]string) []map[string]any {
 	byID := map[string]string{}
 	for _, row := range outbounds {
 		if row.ID != "" && row.Name != "" {
@@ -889,8 +894,8 @@ func xrayRouteRules(routes []RouteSpec, outbounds []OutboundSpec) []map[string]a
 			continue
 		}
 		rule := map[string]any{"type": "field", "outboundTag": tag}
-		if s.InboundID != "" {
-			rule["inboundTag"] = []string{s.InboundID}
+		if tags := inboundAliasTags(s.InboundID, inboundTags); len(tags) > 0 {
+			rule["inboundTag"] = tags
 		}
 		if domains := splitCSV(s.Domain); len(domains) > 0 {
 			rule["domain"] = domains

@@ -4,7 +4,7 @@ import "testing"
 
 func TestAllowWithinBudget(t *testing.T) {
 	s := New()
-	s.Configure("u", 100)
+	s.Configure("u", 800)
 	if !s.Allow("u", 50) {
 		t.Fatal("first")
 	}
@@ -22,7 +22,7 @@ func TestUnlimited(t *testing.T) {
 
 func TestWaitSplitsOverBurst(t *testing.T) {
 	s := New()
-	s.Configure("u", 100)
+	s.Configure("u", 800)
 	if got := s.Wait("u", 250, nil); got != 100 {
 		t.Fatalf("first take %d", got)
 	}

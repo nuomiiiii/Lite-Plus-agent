@@ -324,6 +324,10 @@ const presenceFresh = 45 * time.Second
 
 func (p *policyEngine) presence() []Presence {
 	live := p.sess.LiveIPs()
+	coreIPs := map[string][]string{}
+	if p.ips != nil {
+		coreIPs = p.ips.liveIPs()
+	}
 	counts := p.sess.OnlineCounts()
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -334,6 +338,9 @@ func (p *policyEngine) presence() []Presence {
 	for id := range live {
 		ids[id] = struct{}{}
 	}
+	for id := range coreIPs {
+		ids[id] = struct{}{}
+	}
 	for id := range counts {
 		ids[id] = struct{}{}
 	}
@@ -341,9 +348,17 @@ func (p *policyEngine) presence() []Presence {
 	now := time.Now().UTC()
 	nextSeen := map[string]map[string]time.Time{}
 	for id := range ids {
-		row := Presence{UserID: id, Online: counts[id] > 0 || len(live[id]) > 0}
+		row := Presence{UserID: id, Online: counts[id] > 0 || len(live[id]) > 0 || len(coreIPs[id]) > 0}
 		held := map[string]time.Time{}
 		for _, ip := range live[id] {
+			ip = strings.TrimSpace(ip)
+			if ip == "" {
+				continue
+			}
+			held[ip] = now
+			row.Online = true
+		}
+		for _, ip := range coreIPs[id] {
 			ip = strings.TrimSpace(ip)
 			if ip == "" {
 				continue
@@ -751,15 +766,60 @@ func intersectTags(tags, policy []string) []string {
 }
 
 func ruleHasDestFilter(rule map[string]any) bool {
-	for _, key := range []string{"domain", "ip", "ip_cidr", "protocol", "port", "source", "source_ip", "network"} {
-		if len(ruleStringList(rule[key])) > 0 {
-			return true
+	if rule == nil {
+		return false
+	}
+	if strings.EqualFold(fmt.Sprint(rule["type"]), "logical") {
+		for _, child := range anyMaps(rule["rules"]) {
+			if ruleHasDestFilter(child) {
+				return true
+			}
 		}
-		if s, ok := rule[key].(string); ok && s != "" {
+	}
+	if v, ok := rule["ip_is_private"].(bool); ok && v {
+		return true
+	}
+	for _, key := range []string{
+		"domain", "domain_suffix", "domain_keyword", "domain_regex",
+		"ip", "ip_cidr", "rule_set", "protocol", "port", "port_range",
+		"source", "source_ip", "source_ip_cidr", "network",
+	} {
+		if ruleHasValue(rule[key]) {
 			return true
 		}
 	}
 	return false
+}
+
+func ruleHasValue(v any) bool {
+	if len(ruleStringList(v)) > 0 {
+		return true
+	}
+	switch t := v.(type) {
+	case []int:
+		return len(t) > 0
+	case []any:
+		return len(t) > 0
+	case bool:
+		return t
+	}
+	return false
+}
+
+func anyMaps(v any) []map[string]any {
+	switch t := v.(type) {
+	case []map[string]any:
+		return t
+	case []any:
+		out := make([]map[string]any, 0, len(t))
+		for _, x := range t {
+			if m, ok := x.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 func outboundKind(ob map[string]any) string {
@@ -1098,7 +1158,7 @@ func inboundServerTLS(in InboundSpec) *tls.Config {
 	return &tls.Config{Certificates: []tls.Certificate{cert}}
 }
 
-func newFrontSpec(listen, dest, proto string, in InboundSpec, users []UserSpec) frontSpec {
+func newFrontSpec(listen, dest, proto string, in InboundSpec, users []UserSpec, sendProxy bool) frontSpec {
 	network := inboundNetwork(in)
 	if network == "websocket" {
 		network = "ws"
@@ -1109,7 +1169,7 @@ func newFrontSpec(listen, dest, proto string, in InboundSpec, users []UserSpec) 
 		Dest:          dest,
 		Protocol:      proto,
 		Identity:      identity,
-		ProxyProtocol: !identity,
+		ProxyProtocol: sendProxy && !identity,
 		TLS:           inboundServerTLS(in),
 		Network:       network,
 		WSPath:        inboundWSPath(in),

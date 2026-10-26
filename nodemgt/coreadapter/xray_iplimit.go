@@ -204,18 +204,18 @@ func (d *ipLimitDispatcher) hold(ctx context.Context) (func(), bool) {
 	if inbound.Conn != nil && userID != "" {
 		releases = append(releases, d.policy.trackCoreConn(userID, inbound.Conn))
 	}
+	ip := ""
+	if inbound.Source.Address != nil {
+		ip = inbound.Source.Address.String()
+	}
 	limit := d.policy.ipLimit(userID)
-	if limit > 0 {
-		ip := ""
-		if inbound.Source.Address != nil {
-			ip = inbound.Source.Address.String()
+	if userID != "" && !d.policy.holdIP(userID, ip, limit) {
+		for _, release := range releases {
+			release()
 		}
-		if !d.policy.holdIP(userID, ip, limit) {
-			for _, release := range releases {
-				release()
-			}
-			return nil, false
-		}
+		return nil, false
+	}
+	if userID != "" && normalizeClientIP(ip) != "" {
 		var once sync.Once
 		releases = append(releases, func() { once.Do(func() { d.policy.releaseIP(userID, ip) }) })
 	}

@@ -26,16 +26,16 @@ func (t *ipLimitTracker) holdMeta(metadata adapter.InboundContext) (func(), bool
 	if userID == "" {
 		return nil, true
 	}
-	limit := t.policy.ipLimit(userID)
-	if limit <= 0 {
-		return nil, true
-	}
 	ip := ""
 	if metadata.Source.Addr.IsValid() {
 		ip = metadata.Source.Addr.String()
 	}
+	limit := t.policy.ipLimit(userID)
 	if !t.policy.holdIP(userID, ip, limit) {
 		return nil, false
+	}
+	if normalizeClientIP(ip) == "" {
+		return nil, true
 	}
 	var once sync.Once
 	return func() { once.Do(func() { t.policy.releaseIP(userID, ip) }) }, true

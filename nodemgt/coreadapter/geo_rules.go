@@ -15,7 +15,10 @@ func SetGeoAssetDir(dir string) {
 
 type geoMatch struct {
 	Geosite []string
-	Domains []string
+	Suffix  []string
+	Exact   []string
+	Keyword []string
+	Regex   []string
 	GeoIP   []string
 	Private bool
 	CIDRs   []string
@@ -59,7 +62,21 @@ func parseGeoMatch(domains, ips []string) geoMatch {
 			m.Geosite = append(m.Geosite, strings.ToLower(code))
 			continue
 		}
-		m.Domains = append(m.Domains, token)
+		prefix, rest, ok := cutMatchPrefix(token)
+		switch {
+		case ok && prefix == "full" && rest != "":
+			m.Exact = append(m.Exact, rest)
+		case ok && prefix == "keyword" && rest != "":
+			m.Keyword = append(m.Keyword, rest)
+		case ok && (prefix == "regexp" || prefix == "regex") && rest != "":
+			m.Regex = append(m.Regex, rest)
+		case ok && prefix == "domain" && rest != "":
+			m.Suffix = append(m.Suffix, rest)
+		default:
+			if token != "" {
+				m.Suffix = append(m.Suffix, token)
+			}
+		}
 	}
 	for _, token := range ips {
 		kind, code, ok := cutGeoPrefix(token)
@@ -88,6 +105,20 @@ func cutGeoPrefix(token string) (kind, code string, ok bool) {
 	return "", "", false
 }
 
+func cutMatchPrefix(token string) (prefix, rest string, ok bool) {
+	token = strings.TrimSpace(token)
+	i := strings.IndexByte(token, ':')
+	if i <= 0 {
+		return "", token, false
+	}
+	prefix = strings.ToLower(token[:i])
+	switch prefix {
+	case "full", "keyword", "regexp", "regex", "domain":
+		return prefix, strings.TrimSpace(token[i+1:]), true
+	}
+	return "", token, false
+}
+
 func uniqueCodes(set map[string]struct{}) []string {
 	out := make([]string, 0, len(set))
 	for code := range set {
@@ -95,6 +126,17 @@ func uniqueCodes(set map[string]struct{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func inboundAliasTags(id string, aliases map[string][]string) []string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	if tags := aliases[id]; len(tags) > 0 {
+		return append([]string(nil), tags...)
+	}
+	return []string{id}
 }
 
 func geoRuleSetTag(kind, code string) string {
@@ -143,8 +185,17 @@ func mergeSingBoxGeo(item map[string]any, m geoMatch) map[string]any {
 	if tags := geoRuleSetTags("geosite", m.Geosite); len(tags) > 0 {
 		domainParts = append(domainParts, map[string]any{"rule_set": tags})
 	}
-	if len(m.Domains) > 0 {
-		domainParts = append(domainParts, map[string]any{"domain": m.Domains})
+	if len(m.Suffix) > 0 {
+		domainParts = append(domainParts, map[string]any{"domain_suffix": m.Suffix})
+	}
+	if len(m.Exact) > 0 {
+		domainParts = append(domainParts, map[string]any{"domain": m.Exact})
+	}
+	if len(m.Keyword) > 0 {
+		domainParts = append(domainParts, map[string]any{"domain_keyword": m.Keyword})
+	}
+	if len(m.Regex) > 0 {
+		domainParts = append(domainParts, map[string]any{"domain_regex": m.Regex})
 	}
 	var ipParts []map[string]any
 	if m.Private {

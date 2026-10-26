@@ -121,7 +121,7 @@ func isAddrInUse(err error) bool {
 		strings.Contains(s, "Only one usage of each socket address")
 }
 
-func inboundPublicFronts(in InboundSpec, dest, proto string, users []UserSpec) []frontSpec {
+func inboundPublicFronts(in InboundSpec, dest, proto string, users []UserSpec, sendProxy bool) []frontSpec {
 	port := fmt.Sprintf("%d", in.Port)
 	hosts := FrontListenHosts(inboundStack(in), in.Listen)
 	out := make([]frontSpec, 0, len(hosts))
@@ -132,6 +132,7 @@ func inboundPublicFronts(in InboundSpec, dest, proto string, users []UserSpec) [
 			proto,
 			in,
 			users,
+			sendProxy,
 		))
 	}
 	return out

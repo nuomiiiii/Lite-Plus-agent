@@ -188,6 +188,64 @@ func TestSingBoxRealityBindsPublicWithoutProxyProtocol(t *testing.T) {
 	}
 }
 
+func TestEnableXrayProxyProtocolXHTTPUsesSockopt(t *testing.T) {
+	got := enableXrayProxyProtocol(map[string]any{"network": "xhttp"})
+	sock, _ := got["sockopt"].(map[string]any)
+	if sock == nil || sock["acceptProxyProtocol"] != true {
+		t.Fatalf("xhttp sockopt: %+v", got)
+	}
+	if _, ok := got["tcpSettings"]; ok {
+		t.Fatalf("xhttp must not use tcpSettings: %+v", got)
+	}
+	split := enableXrayProxyProtocol(map[string]any{"network": "splithttp"})
+	sock, _ = split["sockopt"].(map[string]any)
+	if sock == nil || sock["acceptProxyProtocol"] != true {
+		t.Fatalf("splithttp sockopt: %+v", split)
+	}
+}
+
+func TestSingBoxSOCKSStillUsesIdentityFront(t *testing.T) {
+	c := newSingBoxCore()
+	c.users = []UserSpec{{ID: "u1", UUID: vlessAlice, Password: "pw"}}
+	c.inbounds = []InboundSpec{{ID: "socks", Listen: "127.0.0.1", Port: 1080, Protocol: "socks"}}
+	raw, _, fronts, err := c.buildConfig(c.users, c.inbounds, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fronts) == 0 || !fronts[0].Identity || fronts[0].Addr != "127.0.0.1:1080" {
+		t.Fatalf("socks must keep the identity front: %+v", fronts)
+	}
+	if strings.Contains(string(raw), `"listen_port":1080`) {
+		t.Fatalf("socks core must not bind the public port: %s", raw)
+	}
+}
+
+func TestSingBoxTrojanAndVMessBindPublicWithoutProxyProtocol(t *testing.T) {
+	c := newSingBoxCore()
+	c.users = []UserSpec{{ID: "u1", UUID: vlessAlice, Password: "pw"}}
+	for _, proto := range []string{"trojan", "vmess"} {
+		c.inbounds = []InboundSpec{{
+			ID: proto, Listen: "127.0.0.1", Port: 443, Protocol: proto,
+			StreamJSON: `{"network":"tcp","security":"tls"}`,
+			CertPEM:    "cert", KeyPEM: "key",
+		}}
+		raw, _, fronts, err := c.buildConfig(c.users, c.inbounds, nil, nil)
+		if err != nil {
+			t.Fatal(proto, err)
+		}
+		if strings.Contains(string(raw), `"proxy_protocol":true`) {
+			t.Fatalf("%s still sets removed proxy_protocol: %s", proto, raw)
+		}
+		if len(fronts) != 0 {
+			t.Fatalf("%s must bind the core publicly so device limits see the client IP, fronts=%+v", proto, fronts)
+		}
+		text := string(raw)
+		if !strings.Contains(text, `"listen":"127.0.0.1"`) || !strings.Contains(text, `"listen_port":443`) {
+			t.Fatalf("%s must listen on the public port: %s", proto, raw)
+		}
+	}
+}
+
 func TestWriteProxyProtocolV1Unknown(t *testing.T) {
 	var b strings.Builder
 	if err := writeProxyProtocolV1(&b, fakeAddrConn{}, nil); err != nil {

@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -194,6 +195,120 @@ func TestTLSVLESSQuotaDeviceAndPeerSession(t *testing.T) {
 	}
 }
 
+func presenceHasIP(rows []Presence, userID, ip string) bool {
+	for _, row := range rows {
+		if row.UserID != userID || !row.Online {
+			continue
+		}
+		for _, item := range row.IPs {
+			if item.IP == ip {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestVLESSPresenceIncludesClientIP(t *testing.T) {
+	echo := startEcho(t)
+	defer echo.Close()
+	host, portStr, _ := net.SplitHostPort(echo.Addr().String())
+	var destPort int
+	fmt.Sscanf(portStr, "%d", &destPort)
+	payload := []byte("vless-ip")
+	for _, maker := range []func() Core{NewXray, NewSingBox} {
+		core := maker()
+		t.Run(core.Name(), func(t *testing.T) {
+			defer core.Stop()
+			port := freePort(t)
+			if err := core.ApplyUsers([]UserSpec{{ID: "u1", UUID: vlessAlice, Password: "pw"}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := core.Start(context.Background(), []InboundSpec{{
+				ID: "vless", Core: core.Name(), Listen: "127.0.0.1", Port: port, Protocol: "vless",
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			addr := fmt.Sprintf("127.0.0.1:%d", port)
+			waitProxy(t, addr)
+			conn, err := vlessRoundTripConn(addr, vlessAlice, host, destPort, payload, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			if !presenceHasIP(core.Presence(), "u1", "127.0.0.1") {
+				t.Fatalf("vless identity presence %+v", core.Presence())
+			}
+			conn.Close()
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				if !presenceHasIP(core.Presence(), "u1", "127.0.0.1") {
+					return
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			t.Fatalf("offline still has ip %+v", core.Presence())
+		})
+	}
+}
+
+func TestVLESSRealityPresenceIncludesClientIP(t *testing.T) {
+	echo := startEcho(t)
+	defer echo.Close()
+	certPEM, keyPEM, _ := auditCerts(t)
+	decoy := startTLS13Decoy(t, certPEM, keyPEM)
+	defer decoy.Close()
+	priv, pub := realityKeys(t)
+	stream, err := json.Marshal(map[string]any{
+		"network": "tcp", "security": "reality",
+		"realitySettings": map[string]any{
+			"dest": decoy.Addr().String(), "target": decoy.Addr().String(),
+			"serverNames": []string{"audit.test"}, "privateKey": priv, "shortIds": []string{"abcd"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, maker := range []func() Core{NewXray, NewSingBox} {
+		core := maker()
+		t.Run(core.Name(), func(t *testing.T) {
+			defer core.Stop()
+			if err := core.ApplyUsers([]UserSpec{{ID: "u1", UUID: vlessAlice, Password: "pw"}}); err != nil {
+				t.Fatal(err)
+			}
+			port := freePort(t)
+			if err := core.Start(context.Background(), []InboundSpec{{
+				ID: "reality", Core: core.Name(), Listen: "127.0.0.1", Port: port, Protocol: "vless",
+				StreamJSON: string(stream),
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			waitProxy(t, fmt.Sprintf("127.0.0.1:%d", port))
+			cli, conn, err := xrayDialRetry(port, vlessAlice, "", "reality", pub, "", echo.Addr().String())
+			if err != nil {
+				t.Fatalf("reality connect: %v", err)
+			}
+			defer cli.Close()
+			defer conn.Close()
+			if core.Name() == "xray" && !echoConn(conn, []byte("ip")) {
+				t.Fatal("xray reality echo")
+			}
+			found := false
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				if presenceHasIP(core.Presence(), "u1", "127.0.0.1") {
+					found = true
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			if !found {
+				t.Fatalf("vless reality presence %+v", core.Presence())
+			}
+		})
+	}
+}
+
 func TestVLESSWebSocketHandshake(t *testing.T) {
 	echo := startEcho(t)
 	defer echo.Close()
@@ -353,6 +468,50 @@ func vlessEcho(t *testing.T, addr, id, destHost string, destPort int, payload []
 		t.Fatal(err)
 	}
 	return got
+}
+
+func vlessRoundTripConn(addr, id, destHost string, destPort int, payload []byte, useTLS bool) (net.Conn, error) {
+	var conn net.Conn
+	var err error
+	if useTLS {
+		d := &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		conn, err = d.DialContext(ctx, "tcp", addr)
+	} else {
+		conn, err = net.DialTimeout("tcp", addr, 3*time.Second)
+	}
+	if err != nil {
+		return nil, err
+	}
+	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
+	header, err := encodeVLESSHeader(id, destHost, destPort)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if _, err := conn.Write(append(header, payload...)); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	resp := make([]byte, 2)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if resp[1] > 0 {
+		if _, err := io.ReadFull(conn, make([]byte, int(resp[1]))); err != nil {
+			conn.Close()
+			return nil, err
+		}
+	}
+	buf := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	_ = conn.SetDeadline(time.Time{})
+	return conn, nil
 }
 
 func vlessRoundTrip(addr, id, destHost string, destPort int, payload []byte, useTLS bool) ([]byte, error) {

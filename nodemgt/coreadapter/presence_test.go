@@ -34,3 +34,32 @@ func TestPolicyPresenceReportsOnlyLiveIPs(t *testing.T) {
 		t.Fatalf("offline user should leave presence after prune %+v", p.presence())
 	}
 }
+
+func TestPolicyPresenceIncludesCoreHeldIPs(t *testing.T) {
+	p := &policyEngine{
+		sess: sessions.New(),
+		ips:  newIPGuard(),
+		seen: map[string]map[string]time.Time{},
+	}
+	if !p.holdIP("u1", "203.0.113.10", 0) {
+		t.Fatal("hold unlimited")
+	}
+	rows := p.presence()
+	if len(rows) != 1 || rows[0].UserID != "u1" || !rows[0].Online || len(rows[0].IPs) != 1 || rows[0].IPs[0].IP != "203.0.113.10" {
+		t.Fatalf("core-held ip %+v", rows)
+	}
+	p.trackSession(&sessions.Session{ID: "exit", UserID: "u1", HideIP: true})
+	rows = p.presence()
+	if len(rows) != 1 || !rows[0].Online || len(rows[0].IPs) != 1 || rows[0].IPs[0].IP != "203.0.113.10" {
+		t.Fatalf("policy-exit hideip must not replace core ip %+v", rows)
+	}
+	p.releaseIP("u1", "203.0.113.10")
+	p.sess.Remove("exit")
+	rows = p.presence()
+	if len(rows) != 1 || rows[0].Online || len(rows[0].IPs) != 0 {
+		t.Fatalf("release must drop ip %+v", rows)
+	}
+	if leftover := p.presence(); len(leftover) != 0 {
+		t.Fatalf("offline user should leave presence after prune %+v", leftover)
+	}
+}

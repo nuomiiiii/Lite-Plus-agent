@@ -554,6 +554,27 @@ func TestSingBoxOutboundIgnoresLeftoverSSMethod(t *testing.T) {
 	}
 }
 
+func TestSingBoxAnyTLSPolicyConfigParses(t *testing.T) {
+	c := newSingBoxCore()
+	c.users = []UserSpec{{ID: "u1", UUID: "alice", Password: "pw", QuotaBytes: 1 << 20}}
+	c.inbounds = []InboundSpec{{
+		ID: "anytls", Listen: "127.0.0.1", Port: 443, Protocol: "anytls",
+		CertPEM: "cert", KeyPEM: "key",
+		StreamJSON: `{"network":"tcp","security":"tls"}`,
+	}}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"auth_user"`) {
+		t.Fatalf("expected auth_user policy rule: %s", raw)
+	}
+	ctx := include.Context(context.Background())
+	if _, err := singjson.UnmarshalExtendedContext[option.Options](ctx, raw); err != nil {
+		t.Fatalf("sing-box rejected anytls policy: %v\n%s", err, raw)
+	}
+}
+
 func TestSingBoxConfigParsesLeftoverOutboundSSMethod(t *testing.T) {
 	c := newSingBoxCore()
 	c.outbounds = []OutboundSpec{{

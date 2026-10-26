@@ -14,8 +14,8 @@ import (
 )
 
 func TestDefaultUpdateRepo(t *testing.T) {
-	if CurrentVersion != "0.0.1.2" {
-		t.Fatalf("CurrentVersion = %q, want 0.0.1.2", CurrentVersion)
+	if CurrentVersion != "0.0.1.3" {
+		t.Fatalf("CurrentVersion = %q, want 0.0.1.3", CurrentVersion)
 	}
 	if Repo != "nuomiiiii/Lite-Plus-agent" {
 		t.Fatalf("Repo = %q, want nuomiiiii/Lite-Plus-agent", Repo)
@@ -212,6 +212,9 @@ func TestNeedUpdate(t *testing.T) {
 		{"0.0.1.1", "0.0.1.2", true},
 		{"0.0.1.1+abc1234", "0.0.1.2", true},
 		{"0.0.1.2+abc1234", "0.0.1.2", false},
+		{"0.0.1.2", "0.0.1.3", true},
+		{"0.0.1.2+abc1234", "0.0.1.3", true},
+		{"0.0.1.3+abc1234", "0.0.1.3", false},
 	}
 
 	for _, tt := range tests {

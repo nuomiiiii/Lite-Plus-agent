@@ -244,6 +244,7 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 	var fronts []frontSpec
 	var policyTags []string
 	var skipIP []string
+	listenTags := map[string][]string{}
 	for i, in := range inbounds {
 		tag := in.ID
 		if tag == "" {
@@ -267,7 +268,11 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 		listenPort := in.Port
 		var pendingFronts []frontSpec
 		udp := udpInbound(proto)
-		public := udp || coreOwnedTLS(in, users)
+		// SOCKS/HTTP/VLESS TCP+WS authenticate on the policy front and hold
+		// IP from conn.RemoteAddr. Everything else authenticates inside
+		// sing-box. Inbound PROXY protocol was removed in 1.6.0, so those
+		// protocols must bind the public address or device limits see 127.0.0.1.
+		public := udp || coreOwnedTLS(in, users) || !identityFront(in, users)
 		if !public {
 			internalPort, err := reserveLoopbackPort()
 			if err != nil {
@@ -280,6 +285,7 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 				net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", internalPort)),
 				proto,
 				users,
+				false,
 			)
 		}
 		item := map[string]any{
@@ -294,9 +300,6 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 			}
 			if transport := singBoxTransport(in); transport != nil {
 				item["transport"] = transport
-			}
-			if len(pendingFronts) > 0 {
-				item["proxy_protocol"] = true
 			}
 		}
 		switch proto {
@@ -391,19 +394,26 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 				cloned["tag"] = useTag
 			}
 			items = append(items, cloned)
+			if in.ID != "" {
+				listenTags[in.ID] = append(listenTags[in.ID], useTag)
+			}
 			if identityFront(in, users) {
 				skipIP = append(skipIP, useTag)
 			}
 		}
 		if policyExitNeeded(in, users, false) {
-			policyTags = append(policyTags, tag)
+			if extra := listenTags[in.ID]; len(extra) > 0 {
+				policyTags = append(policyTags, extra...)
+			} else {
+				policyTags = append(policyTags, tag)
+			}
 		}
 		if len(pendingFronts) > 0 {
 			fronts = append(fronts, pendingFronts...)
 		}
 	}
 	obs := singBoxOutbounds(outbounds)
-	rules := append(singBoxSniffRules(inbounds), singBoxRouteRules(routes, outbounds)...)
+	rules := append(singBoxSniffRules(inbounds, listenTags), singBoxRouteRules(routes, outbounds, listenTags)...)
 	if len(policyTags) > 0 {
 		var extra []frontSpec
 		var coreIn []map[string]any
@@ -641,7 +651,7 @@ func singBoxProxyOutbound(row OutboundSpec, tag string, tags map[string]string) 
 	return item
 }
 
-func singBoxRouteRules(routes []RouteSpec, outbounds []OutboundSpec) []map[string]any {
+func singBoxRouteRules(routes []RouteSpec, outbounds []OutboundSpec, inboundTags map[string][]string) []map[string]any {
 	tags := outboundTagIndex(outbounds)
 	sorted := append([]RouteSpec(nil), routes...)
 	for i := 0; i < len(sorted); i++ {
@@ -692,8 +702,8 @@ func singBoxRouteRules(routes []RouteSpec, outbounds []OutboundSpec) []map[strin
 		if sources := splitCSV(rule.Source); len(sources) > 0 {
 			item["source_ip_cidr"] = sources
 		}
-		if rule.InboundID != "" {
-			item["inbound"] = []string{rule.InboundID}
+		if tags := inboundAliasTags(rule.InboundID, inboundTags); len(tags) > 0 {
+			item["inbound"] = tags
 		}
 		rules = append(rules, mergeSingBoxGeo(item, parseGeoMatch(splitCSV(rule.Domain), splitCSV(rule.IP))))
 	}
@@ -825,7 +835,7 @@ func singBoxHandshake(dest string) map[string]any {
 	return item
 }
 
-func singBoxSniffRules(inbounds []InboundSpec) []map[string]any {
+func singBoxSniffRules(inbounds []InboundSpec, inboundTags map[string][]string) []map[string]any {
 	var out []map[string]any
 	for _, in := range inbounds {
 		var s struct {
@@ -838,8 +848,12 @@ func singBoxSniffRules(inbounds []InboundSpec) []map[string]any {
 		if !s.Sniffing || strings.TrimSpace(in.ID) == "" {
 			continue
 		}
+		tags := inboundAliasTags(in.ID, inboundTags)
+		if len(tags) == 0 {
+			continue
+		}
 		out = append(out, map[string]any{
-			"inbound": []string{in.ID},
+			"inbound": tags,
 			"action":  "sniff",
 		})
 	}
