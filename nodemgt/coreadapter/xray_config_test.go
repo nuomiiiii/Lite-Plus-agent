@@ -1,9 +1,14 @@
 package coreadapter
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/sagernet/sing-box/include"
+	"github.com/sagernet/sing-box/option"
+	singjson "github.com/sagernet/sing/common/json"
 )
 
 func TestXrayConfigAppliesSniffingStreamAndRoutes(t *testing.T) {
@@ -523,6 +528,93 @@ func TestSingBoxOutboundDefaultsShadowsocksMethod(t *testing.T) {
 	}})
 	if method := outbounds[len(outbounds)-1]["method"]; method != "2022-blake3-aes-128-gcm" {
 		t.Fatalf("method=%v", method)
+	}
+}
+
+func TestSingBoxOutboundIgnoresLeftoverSSMethod(t *testing.T) {
+	leftover := `{"address":"example.com","port":443,"uuid":"11111111-1111-1111-1111-111111111111","username":"","password":"","ss_method":"2022-blake3-aes-128-gcm","via_outbound":"exit"}`
+	outbounds := singBoxOutbounds([]OutboundSpec{
+		{ID: "exit", Name: "exit", Protocol: "socks", Enabled: true, SettingsJSON: `{"address":"127.0.0.1","port":1080,"ss_method":"2022-blake3-aes-128-gcm"}`},
+		{ID: "relay", Name: "relay", Protocol: "vless", Enabled: true, SettingsJSON: leftover},
+	})
+	for _, ob := range outbounds {
+		switch ob["tag"] {
+		case "relay", "exit":
+			if _, ok := ob["method"]; ok {
+				t.Fatalf("%s outbound must not copy leftover ss_method: %v", ob["tag"], ob)
+			}
+		}
+	}
+	relay := outboundByTag(outbounds, "relay")
+	if relay == nil || relay["detour"] != "exit" {
+		t.Fatalf("via_outbound detour=%v", relay)
+	}
+	if _, ok := relay["username"]; ok {
+		t.Fatalf("vless outbound must not copy empty socks fields: %v", relay)
+	}
+}
+
+func TestSingBoxConfigParsesLeftoverOutboundSSMethod(t *testing.T) {
+	c := newSingBoxCore()
+	c.outbounds = []OutboundSpec{{
+		ID: "ob1", Name: "relay", Protocol: "vless", Enabled: true,
+		SettingsJSON: `{"address":"example.com","port":443,"uuid":"11111111-1111-1111-1111-111111111111","ss_method":"2022-blake3-aes-128-gcm"}`,
+	}}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := include.Context(context.Background())
+	if _, err := singjson.UnmarshalExtendedContext[option.Options](ctx, raw); err != nil {
+		t.Fatalf("sing-box rejected leftover ss_method: %v\n%s", err, raw)
+	}
+}
+
+func TestSingBoxRouteMapsDestAndViaSelectors(t *testing.T) {
+	c := newSingBoxCore()
+	c.outbounds = []OutboundSpec{
+		{ID: "ob1", Name: "proxy", Protocol: "direct", Enabled: true},
+	}
+	c.routes = []RouteSpec{
+		{ID: "late", Enabled: true, Priority: 10, RuleJSON: `{"outbound_id":"direct"}`},
+		{ID: "first", Enabled: true, Priority: 0, RuleJSON: `{"outbound_id":"ob1","ip":"10.0.0.0/8","network":"tcp","port":"443,1000-2000","source":"192.168.1.0/24"}`},
+	}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		Route struct {
+			Rules []map[string]any `json:"rules"`
+		} `json:"route"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Route.Rules) < 2 {
+		t.Fatalf("rules=%v", cfg.Route.Rules)
+	}
+	first, late := cfg.Route.Rules[0], cfg.Route.Rules[1]
+	if first["outbound"] != "proxy" {
+		t.Fatalf("priority 0 should lead: %v", cfg.Route.Rules)
+	}
+	if late["outbound"] != "direct" {
+		t.Fatalf("catch-all direct missing: %v", late)
+	}
+	if cidrs, _ := first["ip_cidr"].([]any); len(cidrs) != 1 || cidrs[0] != "10.0.0.0/8" {
+		t.Fatalf("dest ip=%v", first["ip_cidr"])
+	}
+	if nets, _ := first["network"].([]any); len(nets) != 1 || nets[0] != "tcp" {
+		t.Fatalf("network=%v", first["network"])
+	}
+	if ports, _ := first["port"].([]any); len(ports) != 1 || int(ports[0].(float64)) != 443 {
+		t.Fatalf("port=%v", first["port"])
+	}
+	if ranges, _ := first["port_range"].([]any); len(ranges) != 1 || ranges[0] != "1000:2000" {
+		t.Fatalf("port_range=%v", first["port_range"])
+	}
+	if src, _ := first["source_ip_cidr"].([]any); len(src) != 1 || src[0] != "192.168.1.0/24" {
+		t.Fatalf("source=%v", first["source_ip_cidr"])
 	}
 }
 

@@ -541,74 +541,118 @@ func singBoxTLS(in InboundSpec) map[string]any {
 
 func singBoxOutbounds(rows []OutboundSpec) []map[string]any {
 	out := []map[string]any{{"type": "direct", "tag": "direct"}, {"type": "block", "tag": "block"}}
+	tags := outboundTagIndex(rows)
 	for _, row := range rows {
 		if !row.Enabled {
 			continue
 		}
-		tag := row.Name
-		if tag == "" {
-			tag = row.ID
-		}
+		tag := outboundTag(row)
 		switch strings.ToLower(row.Protocol) {
 		case "freedom", "direct":
 			out = append(out, map[string]any{"type": "direct", "tag": tag})
 		case "blackhole", "block":
 			out = append(out, map[string]any{"type": "block", "tag": tag})
 		default:
-			var settings map[string]any
-			_ = json.Unmarshal([]byte(row.SettingsJSON), &settings)
-			item := map[string]any{"type": strings.ToLower(row.Protocol), "tag": tag}
-			if settings != nil {
-				if addr, _ := settings["address"].(string); addr != "" {
-					item["server"] = addr
-				}
-				if port, ok := settings["port"].(float64); ok {
-					item["server_port"] = int(port)
-				}
-				if uuid, _ := settings["uuid"].(string); uuid != "" {
-					item["uuid"] = uuid
-				}
-				if user, _ := settings["username"].(string); user != "" {
-					item["username"] = user
-				}
-				if pass, _ := settings["password"].(string); pass != "" {
-					item["password"] = pass
-				}
-				if method, _ := settings["ss_method"].(string); method != "" {
-					item["method"] = method
-				} else if strings.EqualFold(row.Protocol, "shadowsocks") {
-					item["method"] = "2022-blake3-aes-128-gcm"
-				}
-				if flow, _ := settings["flow"].(string); flow != "" {
-					item["flow"] = flow
-				}
-				if via, _ := settings["via_outbound"].(string); via != "" {
-					item["detour"] = via
-				}
-				if transport := singBoxOutboundTransport(settings); transport != nil {
-					item["transport"] = transport
-				}
-				if tls := singBoxOutboundTLS(settings); tls != nil {
-					item["tls"] = tls
-				}
-			}
-			out = append(out, item)
+			out = append(out, singBoxProxyOutbound(row, tag, tags))
 		}
 	}
 	return out
 }
 
-func singBoxRouteRules(routes []RouteSpec, outbounds []OutboundSpec) []map[string]any {
-	byID := map[string]string{}
-	for _, ob := range outbounds {
-		tag := ob.Name
-		if tag == "" {
-			tag = ob.ID
+func outboundTag(row OutboundSpec) string {
+	if row.Name != "" {
+		return row.Name
+	}
+	return row.ID
+}
+
+func outboundTagIndex(rows []OutboundSpec) map[string]string {
+	idx := map[string]string{}
+	for _, row := range rows {
+		tag := outboundTag(row)
+		if row.ID != "" {
+			idx[row.ID] = tag
 		}
-		byID[ob.ID] = tag
+		if row.Name != "" {
+			idx[row.Name] = tag
+		}
+	}
+	return idx
+}
+
+func singBoxProxyOutbound(row OutboundSpec, tag string, tags map[string]string) map[string]any {
+	var settings map[string]any
+	_ = json.Unmarshal([]byte(row.SettingsJSON), &settings)
+	if settings == nil {
+		settings = map[string]any{}
+	}
+	proto := strings.ToLower(row.Protocol)
+	item := map[string]any{"type": proto, "tag": tag}
+	if addr, _ := settings["address"].(string); addr != "" {
+		item["server"] = addr
+	}
+	if port := jsonPort(settings["port"]); port > 0 {
+		item["server_port"] = port
+	}
+	switch proto {
+	case "shadowsocks":
+		method, _ := settings["ss_method"].(string)
+		if method == "" {
+			method = "2022-blake3-aes-128-gcm"
+		}
+		item["method"] = method
+		if pass, _ := settings["password"].(string); pass != "" {
+			item["password"] = pass
+		}
+	case "vless", "vmess":
+		if uuid, _ := settings["uuid"].(string); uuid != "" {
+			item["uuid"] = uuid
+		}
+		if proto == "vless" {
+			if flow, _ := settings["flow"].(string); flow != "" {
+				item["flow"] = flow
+			}
+		}
+	case "trojan", "anytls":
+		if pass, _ := settings["password"].(string); pass != "" {
+			item["password"] = pass
+		}
+	case "socks", "http":
+		if user, _ := settings["username"].(string); user != "" {
+			item["username"] = user
+		}
+		if pass, _ := settings["password"].(string); pass != "" {
+			item["password"] = pass
+		}
+	}
+	if via, _ := settings["via_outbound"].(string); via != "" {
+		if detour := tags[via]; detour != "" {
+			item["detour"] = detour
+		} else {
+			item["detour"] = via
+		}
+	}
+	if transport := singBoxOutboundTransport(settings); transport != nil {
+		item["transport"] = transport
+	}
+	if tls := singBoxOutboundTLS(settings); tls != nil {
+		item["tls"] = tls
+	}
+	return item
+}
+
+func singBoxRouteRules(routes []RouteSpec, outbounds []OutboundSpec) []map[string]any {
+	tags := outboundTagIndex(outbounds)
+	sorted := append([]RouteSpec(nil), routes...)
+	for i := 0; i < len(sorted); i++ {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[j].Priority < sorted[i].Priority {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
 	}
 	var rules []map[string]any
-	for _, row := range routes {
+	for _, row := range sorted {
 		if !row.Enabled {
 			continue
 		}
@@ -616,26 +660,59 @@ func singBoxRouteRules(routes []RouteSpec, outbounds []OutboundSpec) []map[strin
 			OutboundID string `json:"outbound_id"`
 			Domain     string `json:"domain"`
 			IP         string `json:"ip"`
+			Network    string `json:"network"`
 			Protocol   string `json:"protocol"`
+			Port       string `json:"port"`
+			Source     string `json:"source"`
 			InboundID  string `json:"inbound_id"`
 		}
 		_ = json.Unmarshal([]byte(row.RuleJSON), &rule)
 		item := map[string]any{}
-		if tag := byID[rule.OutboundID]; tag != "" {
-			item["outbound"] = tag
+		tag := tags[rule.OutboundID]
+		if tag == "" {
+			tag = strings.TrimSpace(rule.OutboundID)
+		}
+		if tag == "" {
+			continue
+		}
+		item["outbound"] = tag
+		if nets := splitCSV(rule.Network); len(nets) > 0 {
+			item["network"] = nets
 		}
 		if rule.Protocol != "" {
 			item["protocol"] = splitCSV(rule.Protocol)
 		}
+		ports, ranges := singBoxRulePorts(rule.Port)
+		if len(ports) > 0 {
+			item["port"] = ports
+		}
+		if len(ranges) > 0 {
+			item["port_range"] = ranges
+		}
+		if sources := splitCSV(rule.Source); len(sources) > 0 {
+			item["source_ip_cidr"] = sources
+		}
 		if rule.InboundID != "" {
 			item["inbound"] = []string{rule.InboundID}
 		}
-		item = mergeSingBoxGeo(item, parseGeoMatch(splitCSV(rule.Domain), splitCSV(rule.IP)))
-		if len(item) > 1 {
-			rules = append(rules, item)
-		}
+		rules = append(rules, mergeSingBoxGeo(item, parseGeoMatch(splitCSV(rule.Domain), splitCSV(rule.IP))))
 	}
 	return rules
+}
+
+func singBoxRulePorts(raw string) (ports []int, ranges []string) {
+	for _, part := range splitCSV(raw) {
+		if strings.ContainsAny(part, "-:") {
+			ranges = append(ranges, strings.ReplaceAll(part, "-", ":"))
+			continue
+		}
+		n, err := strconv.Atoi(part)
+		if err != nil || n <= 0 || n > 65535 {
+			continue
+		}
+		ports = append(ports, n)
+	}
+	return
 }
 
 func singBoxOutboundTLS(settings map[string]any) map[string]any {
