@@ -21,6 +21,7 @@ import (
 	"github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/pipe"
 )
 
 type ipLimitDispatcher struct {
@@ -34,15 +35,18 @@ func (d *ipLimitDispatcher) Dispatch(ctx context.Context, dest xnet.Destination)
 	if !ok {
 		return nil, fmt.Errorf("user denied")
 	}
-	link, err := d.Dispatcher.Dispatch(ctx, dest)
-	if err != nil {
-		if release != nil {
-			release()
+	inbound, outbound := newDispatcherLinks(ctx)
+	d.meterLinks(ctx, inbound, outbound)
+	go func() {
+		if err := d.Dispatcher.DispatchLink(ctx, dest, outbound); err != nil {
+			common.Close(inbound.Writer)
+			common.Interrupt(inbound.Reader)
+			if release != nil {
+				release()
+			}
 		}
-		return nil, err
-	}
-	d.meterLink(ctx, link)
-	return link, nil
+	}()
+	return inbound, nil
 }
 
 func (d *ipLimitDispatcher) DispatchLink(ctx context.Context, dest xnet.Destination, link *transport.Link) error {
@@ -65,20 +69,28 @@ func (d *ipLimitDispatcher) DispatchLink(ctx context.Context, dest xnet.Destinat
 	return nil
 }
 
-func (d *ipLimitDispatcher) meterLink(ctx context.Context, link *transport.Link) {
-	if link == nil || d.policy == nil {
-		return
+func newDispatcherLinks(ctx context.Context) (*transport.Link, *transport.Link) {
+	opt := pipe.OptionsFromContext(ctx)
+	uplinkReader, uplinkWriter := pipe.New(opt...)
+	downlinkReader, downlinkWriter := pipe.New(opt...)
+	return &transport.Link{Reader: downlinkReader, Writer: uplinkWriter},
+		&transport.Link{Reader: uplinkReader, Writer: downlinkWriter}
+}
+
+func (d *ipLimitDispatcher) prepareMeter(ctx context.Context) (string, bool) {
+	if d.policy == nil {
+		return "", false
 	}
 	inbound := session.InboundFromContext(ctx)
 	if inbound == nil || inbound.User == nil || inbound.User.Email == "" {
-		return
+		return "", false
 	}
 	if !d.policy.meterCoreTag(inbound.Tag) {
-		return
+		return "", false
 	}
 	userID := d.policy.mapStatName(inbound.User.Email)
 	if userID == "" {
-		return
+		return "", false
 	}
 	inbound.CanSpliceCopy = 3
 	for _, outbound := range session.OutboundsFromContext(ctx) {
@@ -86,7 +98,28 @@ func (d *ipLimitDispatcher) meterLink(ctx context.Context, link *transport.Link)
 			outbound.CanSpliceCopy = 3
 		}
 	}
+	return userID, true
+}
+
+func (d *ipLimitDispatcher) meterLink(ctx context.Context, link *transport.Link) {
+	userID, ok := d.prepareMeter(ctx)
+	if !ok || link == nil {
+		return
+	}
 	link.Reader, link.Writer = wrapQuotaIO(d.policy, userID, link.Reader, link.Writer)
+}
+
+func (d *ipLimitDispatcher) meterLinks(ctx context.Context, inbound, outbound *transport.Link) {
+	userID, ok := d.prepareMeter(ctx)
+	if !ok {
+		return
+	}
+	if inbound != nil {
+		_, inbound.Writer = wrapQuotaIO(d.policy, userID, nil, inbound.Writer)
+	}
+	if outbound != nil {
+		_, outbound.Writer = wrapQuotaIO(d.policy, userID, nil, outbound.Writer)
+	}
 }
 
 type quotaReader struct {
@@ -135,9 +168,19 @@ func (w *quotaWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	return w.Writer.WriteMultiBuffer(mb)
 }
 
+func (w *quotaWriter) Close() error {
+	return common.Close(w.Writer)
+}
+
+func (w *quotaWriter) Interrupt() {
+	common.Interrupt(w.Writer)
+}
+
 func wrapQuotaIO(policy *policyEngine, userID string, r buf.Reader, w buf.Writer) (buf.Reader, buf.Writer) {
 	if r != nil {
-		r = &quotaReader{Reader: r, policy: policy, userID: userID}
+		if _, keep := r.(*pipe.Reader); !keep {
+			r = &quotaReader{Reader: r, policy: policy, userID: userID}
+		}
 	}
 	if w != nil {
 		w = &quotaWriter{Writer: w, policy: policy, userID: userID}
