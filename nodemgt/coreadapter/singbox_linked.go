@@ -330,10 +330,21 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 				if id == "" {
 					continue
 				}
-				clients = append(clients, map[string]string{"uuid": id, "name": u.ID})
+				client := map[string]string{"uuid": id, "name": u.ID}
+				if proto == "vless" {
+					if flow := singBoxNormalizeFlow(u.Flow); flow != "" && inboundAllowsVLESSFlow(in) {
+						client["flow"] = flow
+					}
+				}
+				clients = append(clients, client)
 			}
 			if len(clients) == 0 {
 				continue
+			}
+			if proto == "vless" && inboundAllowsVLESSFlow(in) {
+				if flow := singBoxNormalizeFlow(inboundFlow(in)); flow != "" {
+					clients = applyClientFlow(clients, flow)
+				}
 			}
 			item["users"] = clients
 		case "trojan", "hysteria2", "anytls":
@@ -620,7 +631,9 @@ func singBoxProxyOutbound(row OutboundSpec, tag string, tags map[string]string) 
 		}
 		if proto == "vless" {
 			if flow, _ := settings["flow"].(string); flow != "" {
-				item["flow"] = flow
+				if flow = singBoxNormalizeFlow(flow); flow != "" {
+					item["flow"] = flow
+				}
 			}
 		}
 	case "trojan", "anytls":

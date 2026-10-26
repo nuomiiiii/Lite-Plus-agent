@@ -205,6 +205,66 @@ func TestSingBoxRealityVisionKeepsPolicySocks(t *testing.T) {
 	if !strings.Contains(text, `"network":"tcp"`) {
 		t.Fatalf("sing-box policy SOCKS must be tcp-only: %s", text)
 	}
+	if !strings.Contains(text, `"flow":"xtls-rprx-vision"`) {
+		t.Fatalf("sing-box reality inbound must copy vision onto users: %s", text)
+	}
+}
+
+func TestSingBoxUserFlowVisionWritesInboundUser(t *testing.T) {
+	c := newSingBoxCore()
+	cert, key := testPEMs(t)
+	c.users = []UserSpec{{ID: "u1", UUID: vlessAlice, Password: "pw", Flow: "xtls-rprx-vision"}}
+	c.inbounds = []InboundSpec{{
+		ID: "tls", Protocol: "vless", Listen: "127.0.0.1", Port: 8443,
+		CertPEM: cert, KeyPEM: key,
+	}}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"flow":"xtls-rprx-vision"`) {
+		t.Fatalf("sing-box user flow must land on vless users: %s", text)
+	}
+}
+
+func TestSingBoxUserFlowIgnoredOnWebSocket(t *testing.T) {
+	c := newSingBoxCore()
+	c.users = []UserSpec{{ID: "u1", UUID: vlessAlice, Password: "pw", Flow: "xtls-rprx-vision"}}
+	c.inbounds = []InboundSpec{{
+		ID: "ws", Protocol: "vless", Listen: "127.0.0.1", Port: 8443,
+		StreamJSON: `{"network":"ws","security":"none","wsSettings":{"path":"/vless"}}`,
+	}}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"xtls-rprx-vision"`) {
+		t.Fatalf("sing-box websocket inbound must not stamp vision: %s", raw)
+	}
+}
+
+func TestSingBoxUdp443FlowNormalizedToVision(t *testing.T) {
+	c := newSingBoxCore()
+	c.users = []UserSpec{{ID: "u1", UUID: vlessAlice, Password: "pw", Flow: "xtls-rprx-vision-udp443"}}
+	c.inbounds = []InboundSpec{{
+		ID:         "reality",
+		Protocol:   "vless",
+		Listen:     "127.0.0.1",
+		Port:       443,
+		StreamJSON: `{"network":"tcp","security":"reality","realitySettings":{"dest":"127.0.0.1:9","serverNames":["audit.test"],"privateKey":"dGVzdA","shortIds":["abcd"]}}`,
+	}}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"flow":"xtls-rprx-vision"`) {
+		t.Fatalf("sing-box must map udp443 onto vision: %s", text)
+	}
+	if strings.Contains(text, "udp443") {
+		t.Fatalf("sing-box must not keep udp443 flow: %s", text)
+	}
 }
 
 func TestSingBoxSniffingIsRouteOnly(t *testing.T) {
@@ -726,6 +786,25 @@ func TestSingBoxOutboundAppliesRealityPublicKey(t *testing.T) {
 	}
 	if !strings.Contains(text, `"reality"`) {
 		t.Fatalf("missing reality block: %s", text)
+	}
+}
+
+func TestSingBoxOutboundUdp443NormalizedToVision(t *testing.T) {
+	c := newSingBoxCore()
+	c.outbounds = []OutboundSpec{{
+		ID: "ob1", Name: "relay", Protocol: "vless", Enabled: true,
+		SettingsJSON: `{"address":"example.com","port":443,"uuid":"11111111-1111-1111-1111-111111111111","flow":"xtls-rprx-vision-udp443","transport":"tcp","security":"reality"}`,
+	}}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"flow":"xtls-rprx-vision"`) {
+		t.Fatalf("sing-box outbound must map udp443 onto vision: %s", text)
+	}
+	if strings.Contains(text, "udp443") {
+		t.Fatalf("sing-box outbound must not keep udp443 flow: %s", text)
 	}
 }
 

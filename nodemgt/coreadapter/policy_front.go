@@ -507,6 +507,25 @@ func inboundVision(in InboundSpec) bool {
 	return strings.Contains(strings.ToLower(inboundFlow(in)), "vision")
 }
 
+func inboundAllowsVLESSFlow(in InboundSpec) bool {
+	if strings.ToLower(strings.TrimSpace(in.Protocol)) != "vless" {
+		return false
+	}
+	switch inboundNetwork(in) {
+	case "", "tcp", "raw":
+	default:
+		return false
+	}
+	return inboundPresentsTLS(in)
+}
+
+func singBoxNormalizeFlow(flow string) string {
+	if strings.Contains(strings.ToLower(flow), "vision") {
+		return "xtls-rprx-vision"
+	}
+	return ""
+}
+
 func flowHasVision(flow string) bool {
 	return strings.Contains(strings.ToLower(flow), "vision")
 }

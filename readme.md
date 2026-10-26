@@ -2,7 +2,7 @@
 
 Lite-Plus 的跨平台节点监控与节点管理 Agent。本仓库版本在基础监控之外，支持安全远程终端、文件管理、远程命令、Cloudflare Access、在线配置下发、配置结果回执，以及双核节点管理。
 
-当前稳定版本：`0.0.1.3`
+当前稳定版本：`0.0.1.4`
 
 使用 MCP 代理功能，Lite需升级至 2.3.3 或更高版本。
 
@@ -59,7 +59,7 @@ docker pull ghcr.io/nuomiiiii/lite-plus-agent:latest
 也可以拉取固定版本：
 
 ```bash
-docker pull ghcr.io/nuomiiiii/lite-plus-agent:0.0.1.3
+docker pull ghcr.io/nuomiiiii/lite-plus-agent:0.0.1.4
 ```
 
 容器的启动参数、宿主机目录挂载和节点 Token 请以 Lite 后台生成的部署命令为准。Docker 部署不会在容器内替换 Agent 二进制；升级时需拉取新镜像并重建容器。
@@ -223,6 +223,7 @@ Client ID 与 Client Secret 必须成对配置，可以选择命令行参数、�
 
 | 版本 | 主要内容 |
 | --- | --- |
+| `0.0.1.4` | sing-box 的 VLESS 入站会写入用户或入站上的 Flow（Vision）。WebSocket、明文入站不会带。`xtls-rprx-vision-udp443` 在 sing-box 上会收成 `xtls-rprx-vision`；Xray 仍可用 udp443。配 Lite-Plus `0.0.7`，主控和节点要一起升。 |
 | `0.0.1.3` | 修复节点限速比后台设置大约快 8 倍的 bug。修复 Trojan、VMess、XHTTP、SplitHTTP 看不到客户端真实 IP 的 bug。修复 VLESS、Reality 等入站不上报在线客户端 IP 的 bug。修复路由域名按完整匹配、不识别后缀/关键词/正则的 bug。 |
 | `0.0.1.2` | 修复 Xray 流量计量导致 XUDP 连接无法正常关闭。上下行流量都会计入配额。 |
 | `0.0.1.1` | 修复出站切换协议后残留设置导致 sing-box 无法启动。路由可按网段、端口、来源 IP 匹配，并按优先级生效。 |
