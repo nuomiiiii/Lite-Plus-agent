@@ -3,6 +3,7 @@ package coreadapter
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -128,6 +129,116 @@ func markDenied(users []UserSpec, userID string) []UserSpec {
 
 func inboundAuthEmpty(granted []UserSpec) bool {
 	return len(granted) == 0
+}
+
+func inboundAccountID(proto, inboundID, user string) string {
+	switch strings.ToLower(strings.TrimSpace(proto)) {
+	case "socks", "mixed":
+		proto = "socks"
+	default:
+		proto = "http"
+	}
+	return proto + "-acct:" + strings.TrimSpace(inboundID) + ":" + user
+}
+
+func inboundSettingsAccounts(in InboundSpec) []UserSpec {
+	var s struct {
+		Accounts []struct {
+			User string `json:"user"`
+			Pass string `json:"pass"`
+		} `json:"accounts"`
+	}
+	if strings.TrimSpace(in.SettingsJSON) != "" {
+		_ = json.Unmarshal([]byte(in.SettingsJSON), &s)
+	}
+	out := make([]UserSpec, 0, len(s.Accounts))
+	for _, row := range s.Accounts {
+		user := strings.TrimSpace(row.User)
+		pass := strings.TrimSpace(row.Pass)
+		if user == "" || pass == "" {
+			continue
+		}
+		out = append(out, UserSpec{
+			ID:         inboundAccountID(in.Protocol, in.ID, user),
+			Username:   user,
+			Password:   pass,
+			InboundIDs: []string{strings.TrimSpace(in.ID)},
+		})
+	}
+	return out
+}
+
+func inboundAllowTransparent(in InboundSpec) bool {
+	var s struct {
+		AllowTransparent bool `json:"allow_transparent"`
+	}
+	if strings.TrimSpace(in.SettingsJSON) == "" {
+		return false
+	}
+	_ = json.Unmarshal([]byte(in.SettingsJSON), &s)
+	return s.AllowTransparent
+}
+
+func userLoginNames(u UserSpec) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	add(u.Username)
+	add(u.UUID)
+	return out
+}
+
+func mergeInboundAccountUsers(users []UserSpec, inbounds []InboundSpec) []UserSpec {
+	out := append([]UserSpec(nil), users...)
+	seen := map[string]struct{}{}
+	mark := func(inboundID, name string) {
+		inboundID = strings.TrimSpace(inboundID)
+		name = strings.TrimSpace(name)
+		if inboundID == "" || name == "" {
+			return
+		}
+		seen[inboundID+"\x00"+name] = struct{}{}
+	}
+	for _, u := range users {
+		names := userLoginNames(u)
+		for _, in := range inbounds {
+			if !grantedOn(u, in.ID) {
+				continue
+			}
+			for _, name := range names {
+				mark(in.ID, name)
+			}
+		}
+	}
+	for _, in := range inbounds {
+		proto := strings.ToLower(strings.TrimSpace(in.Protocol))
+		if proto != "http" && proto != "socks" && proto != "mixed" {
+			continue
+		}
+		for _, acct := range inboundSettingsAccounts(in) {
+			key := strings.TrimSpace(in.ID) + "\x00" + acct.Username
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, acct)
+		}
+	}
+	return out
+}
+
+func liveUsers(users []UserSpec, denied map[string]struct{}, inbounds []InboundSpec) []UserSpec {
+	return mergeInboundAccountUsers(applyDenied(users, denied), inbounds)
 }
 
 func usersForInbound(users []UserSpec, inboundID string) []UserSpec {

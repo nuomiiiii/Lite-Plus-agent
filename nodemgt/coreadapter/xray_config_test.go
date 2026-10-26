@@ -683,6 +683,81 @@ func TestSingBoxSSConfigNoProxyProtocol(t *testing.T) {
 	}
 }
 
+func TestXrayHTTPInboundSettingsAccounts(t *testing.T) {
+	c := newXrayCore()
+	c.inbounds = []InboundSpec{{
+		ID: "http1", Listen: "127.0.0.1", Port: 8080, Protocol: "http",
+		SettingsJSON: `{"accounts":[{"user":"sms","pass":"secret1"}]}`,
+	}}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, part := range []string{`"protocol":"http"`, `"user":"sms"`, `"pass":"secret1"`} {
+		if !strings.Contains(text, part) {
+			t.Fatalf("missing %s in %s", part, text)
+		}
+	}
+}
+
+func TestXraySOCKSInboundSettingsAccounts(t *testing.T) {
+	c := newXrayCore()
+	c.inbounds = []InboundSpec{{
+		ID: "socks1", Listen: "127.0.0.1", Port: 1080, Protocol: "socks",
+		SettingsJSON: `{"accounts":[{"user":"sms","pass":"secret1"}]}`,
+	}}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, part := range []string{`"protocol":"socks"`, `"user":"sms"`, `"pass":"secret1"`} {
+		if !strings.Contains(text, part) {
+			t.Fatalf("missing %s in %s", part, text)
+		}
+	}
+}
+
+func TestSingBoxSOCKSInboundSettingsAccounts(t *testing.T) {
+	c := newSingBoxCore()
+	c.inbounds = []InboundSpec{{
+		ID: "socks1", Listen: "127.0.0.1", Port: 1080, Protocol: "socks",
+		SettingsJSON: `{"accounts":[{"user":"sms","pass":"secret1"}]}`,
+	}}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, part := range []string{`"type":"socks"`, `"username":"sms"`, `"password":"secret1"`} {
+		if !strings.Contains(text, part) {
+			t.Fatalf("missing %s in %s", part, text)
+		}
+	}
+}
+
+func TestXrayHTTPInboundAccountSurvivesOtherInboundUsername(t *testing.T) {
+	c := newXrayCore()
+	c.users = []UserSpec{{
+		ID: "u1", UUID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", Username: "sms", Password: "node",
+		InboundIDs: []string{"vless1"},
+	}}
+	c.inbounds = []InboundSpec{
+		{ID: "vless1", Listen: "127.0.0.1", Port: 443, Protocol: "vless"},
+		{ID: "http1", Listen: "127.0.0.1", Port: 8080, Protocol: "http",
+			SettingsJSON: `{"accounts":[{"user":"sms","pass":"secret1"}]}`},
+	}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"protocol":"http"`) || !strings.Contains(text, `"user":"sms"`) || !strings.Contains(text, `"pass":"secret1"`) {
+		t.Fatalf("http inbound account dropped: %s", text)
+	}
+}
+
 func TestXrayHTTPConfigUsesUsernameAndUUID(t *testing.T) {
 	c := newXrayCore()
 	c.users = []UserSpec{{

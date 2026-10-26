@@ -2,7 +2,7 @@
 
 Lite-Plus 的跨平台节点监控与节点管理 Agent。本仓库版本在基础监控之外，支持安全远程终端、文件管理、远程命令、Cloudflare Access、在线配置下发、配置结果回执，以及双核节点管理。
 
-当前稳定版本：`0.0.0.9`
+当前稳定版本：`0.0.1.0`
 
 使用 MCP 代理功能，Lite需升级至 2.3.3 或更高版本。
 
@@ -59,7 +59,7 @@ docker pull ghcr.io/nuomiiiii/lite-plus-agent:latest
 也可以拉取固定版本：
 
 ```bash
-docker pull ghcr.io/nuomiiiii/lite-plus-agent:0.0.0.9
+docker pull ghcr.io/nuomiiiii/lite-plus-agent:0.0.1.0
 ```
 
 容器的启动参数、宿主机目录挂载和节点 Token 请以 Lite 后台生成的部署命令为准。Docker 部署不会在容器内替换 Agent 二进制；升级时需拉取新镜像并重建容器。
@@ -223,6 +223,7 @@ Client ID 与 Client Secret 必须成对配置，可以选择命令行参数、�
 
 | 版本 | 主要内容 |
 | --- | --- |
+| `0.0.1.0` | HTTP 入站可用入站里配置的用户名密码，并可开启透明代理。SOCKS 入站同样接受用户名密码，不再只认 UUID。 |
 | `0.0.0.9` | 进一步尝试优化 Linux 环境下 Agent 的内存占用。入站补齐 HTTP。Shadowsocks 入站按完整协议可用，默认加密 `2022-blake3-aes-128-gcm`。证书申请支持多 SAN。 |
 | `0.0.0.8` | 尝试一种新的内存优化方案。修复双栈通配入站重复绑端口、无法启动的问题。来自 @jasper-khan #3，并进行优化修改。 |
 | `0.0.0.6` | Lite-Plus-agent 第六个版本。产品号与 Lite-agent 分开。按内存档（256/512/1024/2048/3072/4096）和实际核数收软上限，并定期把空闲内存还给系统。同进程双核（Xray v26.6.27、sing-box v1.14.3）。基线 Lite-agent `2.3.10.0`。 |

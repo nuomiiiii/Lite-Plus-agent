@@ -153,7 +153,8 @@ func (c *singBoxCore) stopLocked() error {
 }
 
 func (c *singBoxCore) restartLocked() error {
-	raw, n, fronts, err := c.buildConfig(applyDenied(c.users, c.denied), c.inbounds, c.outbounds, c.routes)
+	live := liveUsers(c.users, c.denied, c.inbounds)
+	raw, n, fronts, err := c.buildConfig(live, c.inbounds, c.outbounds, c.routes)
 	if err != nil {
 		return err
 	}
@@ -169,7 +170,7 @@ func (c *singBoxCore) restartLocked() error {
 	}
 	c.inst = inst
 	c.cancel = cancel
-	c.policy.sync(c.users, c.denied)
+	c.policy.sync(live, c.denied)
 	c.inst.Router().AppendTracker(newIPLimitTracker(c.policy))
 	started, err := startPolicyFronts(c.policy, fronts)
 	if err != nil {
@@ -193,7 +194,8 @@ func (c *singBoxCore) restoreLastGood() {
 	if len(c.lastIn) == 0 && len(c.lastUsers) == 0 {
 		return
 	}
-	raw, n, fronts, err := c.buildConfig(applyDenied(c.lastUsers, c.denied), c.lastIn, c.lastOut, c.lastRoutes)
+	live := liveUsers(c.lastUsers, c.denied, c.lastIn)
+	raw, n, fronts, err := c.buildConfig(live, c.lastIn, c.lastOut, c.lastRoutes)
 	if err != nil || n == 0 {
 		return
 	}
@@ -203,7 +205,7 @@ func (c *singBoxCore) restoreLastGood() {
 	}
 	c.inst = inst
 	c.cancel = cancel
-	c.policy.sync(c.lastUsers, c.denied)
+	c.policy.sync(live, c.denied)
 	c.inst.Router().AppendTracker(newIPLimitTracker(c.policy))
 	started, ferr := startPolicyFronts(c.policy, fronts)
 	if ferr == nil {
@@ -233,7 +235,7 @@ func startSingBox(raw []byte) (*box.Box, context.CancelFunc, error) {
 }
 
 func (c *singBoxCore) configJSON() ([]byte, error) {
-	raw, _, _, err := c.buildConfig(applyDenied(c.users, c.denied), c.inbounds, c.outbounds, c.routes)
+	raw, _, _, err := c.buildConfig(liveUsers(c.users, c.denied, c.inbounds), c.inbounds, c.outbounds, c.routes)
 	return raw, err
 }
 
@@ -301,9 +303,7 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 		case "socks", "mixed":
 			authUsers := make([]map[string]string, 0, len(granted))
 			for _, u := range granted {
-				if user, pass, ok := socksIdentity(u); ok {
-					authUsers = append(authUsers, map[string]string{"username": user, "password": pass})
-				}
+				authUsers = append(authUsers, proxyAuthUsers(u)...)
 			}
 			if len(authUsers) == 0 {
 				continue
@@ -314,10 +314,12 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 			for _, u := range granted {
 				authUsers = append(authUsers, proxyAuthUsers(u)...)
 			}
-			if len(authUsers) == 0 {
+			if len(authUsers) == 0 && !inboundAllowTransparent(in) {
 				continue
 			}
-			item["users"] = authUsers
+			if len(authUsers) > 0 {
+				item["users"] = authUsers
+			}
 		case "vless", "vmess":
 			clients := make([]map[string]string, 0, len(granted))
 			for _, u := range granted {

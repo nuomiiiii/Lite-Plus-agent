@@ -259,7 +259,8 @@ func (c *xrayCore) stopLocked() error {
 }
 
 func (c *xrayCore) restartLocked() error {
-	raw, n, fronts, err := c.buildConfig(applyDenied(c.users, c.denied), c.inbounds, c.outbounds, c.routes)
+	live := liveUsers(c.users, c.denied, c.inbounds)
+	raw, n, fronts, err := c.buildConfig(live, c.inbounds, c.outbounds, c.routes)
 	if err != nil {
 		return err
 	}
@@ -274,7 +275,7 @@ func (c *xrayCore) restartLocked() error {
 		return err
 	}
 	c.inst = inst
-	c.policy.sync(c.users, c.denied)
+	c.policy.sync(live, c.denied)
 	started, err := startPolicyFronts(c.policy, fronts)
 	if err != nil {
 		_ = c.stopLocked()
@@ -297,7 +298,8 @@ func (c *xrayCore) restoreLastGood() {
 	if len(c.lastIn) == 0 && len(c.lastUsers) == 0 {
 		return
 	}
-	raw, n, fronts, err := c.buildConfig(applyDenied(c.lastUsers, c.denied), c.lastIn, c.lastOut, c.lastRoutes)
+	live := liveUsers(c.lastUsers, c.denied, c.lastIn)
+	raw, n, fronts, err := c.buildConfig(live, c.lastIn, c.lastOut, c.lastRoutes)
 	if err != nil || n == 0 {
 		return
 	}
@@ -306,7 +308,7 @@ func (c *xrayCore) restoreLastGood() {
 		return
 	}
 	c.inst = inst
-	c.policy.sync(c.lastUsers, c.denied)
+	c.policy.sync(live, c.denied)
 	started, err := startPolicyFronts(c.policy, fronts)
 	if err == nil {
 		c.fronts = started
@@ -315,7 +317,7 @@ func (c *xrayCore) restoreLastGood() {
 }
 
 func (c *xrayCore) configJSON() ([]byte, error) {
-	raw, _, _, err := c.buildConfig(applyDenied(c.users, c.denied), c.inbounds, c.outbounds, c.routes)
+	raw, _, _, err := c.buildConfig(liveUsers(c.users, c.denied, c.inbounds), c.inbounds, c.outbounds, c.routes)
 	return raw, err
 }
 
@@ -348,9 +350,7 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 		accounts := make([]map[string]string, 0, len(granted))
 		clients := make([]map[string]string, 0, len(granted))
 		for _, u := range granted {
-			if user, pass, ok := socksIdentity(u); ok {
-				accounts = append(accounts, map[string]string{"user": user, "pass": pass})
-			}
+			accounts = append(accounts, proxyAccounts(u)...)
 			if id := vlessUUID(u); id != "" {
 				client := map[string]string{"id": id, "email": u.ID}
 				if u.Flow != "" {
@@ -422,11 +422,15 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 			for _, u := range granted {
 				httpAccounts = append(httpAccounts, proxyAccounts(u)...)
 			}
-			if len(httpAccounts) == 0 {
+			if len(httpAccounts) == 0 && !inboundAllowTransparent(in) {
 				continue
 			}
 			item["protocol"] = "http"
-			item["settings"] = map[string]any{"accounts": httpAccounts}
+			httpSettings := map[string]any{"accounts": httpAccounts}
+			if inboundAllowTransparent(in) {
+				httpSettings["allowTransparent"] = true
+			}
+			item["settings"] = httpSettings
 		case "socks":
 			if len(accounts) == 0 {
 				continue
