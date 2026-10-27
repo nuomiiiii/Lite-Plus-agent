@@ -118,7 +118,7 @@ exit 0
 func firewallBootUnit() string {
 	return `[Unit]
 Description=Lite Plus host firewall
-After=nftables.service iptables.service netfilter-persistent.service iptables-persistent.service ufw.service firewalld.service 1panel.service 1Panel.service network-pre.target
+After=nftables.service iptables.service ip6tables.service netfilter-persistent.service iptables-persistent.service ufw.service firewalld.service fail2ban.service csf.service bt.service btpanel.service 1panel.service 1Panel.service network-pre.target
 
 [Service]
 Type=oneshot

@@ -62,6 +62,27 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(textLinux, `nft", "list", "table"`) {
 		t.Fatal("nft apply dump must capture only the plus table")
 	}
+	detect := textLinux[strings.Index(textLinux, "func detectLinuxBackend("):]
+	if end := strings.Index(detect, "\nfunc "); end > 0 {
+		detect = detect[:end]
+	}
+	if strings.Index(detect, "hostOwnsIptablesFilter()") < 0 || strings.Index(detect, "hostOwnsIptablesFilter()") > strings.Index(detect, `lookPath("nft")`) {
+		t.Fatal("hosts with an existing iptables-nft INPUT must not use a separate inet liteplus table")
+	}
+	if !strings.Contains(textLinux, "clearOtherBackend(") {
+		t.Fatal("switching to iptables must drop leftover inet liteplus so a later host filter cannot drop plus accepts")
+	}
+	owner, err := os.ReadFile("iptables_owner.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerText := string(owner)
+	if strings.Contains(ownerText, `strings.Contains(blob, "1PANEL")`) || strings.Contains(ownerText, `strings.Contains(blob, "1panel")`) {
+		t.Fatal("host INPUT detect must not special-case one panel by name")
+	}
+	if !strings.Contains(ownerText, "iptablesInputHasForeignRules(") || !strings.Contains(ownerText, "nftInputHasForeignRules(") {
+		t.Fatal("host INPUT detect must look at any foreign INPUT rule")
+	}
 	if !strings.Contains(text, "persistBootLocked(") {
 		t.Fatal("apply and restore must persist the owned table for reboot")
 	}
@@ -81,8 +102,8 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(bootShared), "lite-plus-firewall.service") || !strings.Contains(bootText, "1panel.service") {
-		t.Fatal("boot unit must load plus ports after nftables/1Panel")
+	if !strings.Contains(string(bootShared), "lite-plus-firewall.service") || !strings.Contains(bootText, "fail2ban.service") || !strings.Contains(bootText, "bt.service") {
+		t.Fatal("boot unit must load plus ports after common host firewalls, not only one panel")
 	}
 	if !strings.Contains(bootText, "ownedIptablesRestore(") || !strings.Contains(bootText, "nftTableScript(") {
 		t.Fatal("boot persist must keep every plus allow port, not only ssh")

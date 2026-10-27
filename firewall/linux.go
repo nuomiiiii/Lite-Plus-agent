@@ -30,6 +30,12 @@ func detectLinuxBackend() string {
 	if firewalldActive() {
 		return v2.FirewallBackendFirewalld
 	}
+	if lookPath("iptables") && hostOwnsIptablesFilter() {
+		// Another manager already occupies iptables-nft INPUT (any panel or
+		// custom chain, not a named product). Apply in that table so Plus
+		// ACCEPT skips later jumps; a separate inet table cannot.
+		return v2.FirewallBackendIptables
+	}
 	if lookPath("nft") {
 		return v2.FirewallBackendNFT
 	}
@@ -37,6 +43,17 @@ func detectLinuxBackend() string {
 		return v2.FirewallBackendIptables
 	}
 	return v2.FirewallBackendNone
+}
+
+func hostOwnsIptablesFilter() bool {
+	nftFilter, _ := runCmd(cmdTimeout, "nft", "list", "table", "ip", "filter")
+	nft6, _ := runCmd(cmdTimeout, "nft", "list", "table", "ip6", "filter")
+	save, _ := runCmd(cmdTimeout, "iptables-save", "-t", "filter")
+	save6 := ""
+	if lookPath("ip6tables-save") {
+		save6, _ = runCmd(cmdTimeout, "ip6tables-save", "-t", "filter")
+	}
+	return iptablesFilterOwnedByHost(nftFilter+"\n"+nft6, save+"\n"+save6)
 }
 
 func ufwActive() bool {
@@ -132,6 +149,19 @@ func outerManagers(backend string) []string {
 	return out
 }
 
+func clearOtherBackend(kind string) {
+	if kind != v2.FirewallBackendNFT {
+		_, _ = runCmd(cmdTimeout, "nft", "delete", "table", "inet", nftTable)
+	}
+	if kind != v2.FirewallBackendIptables && kind != v2.FirewallBackendFirewalld {
+		for _, bin := range []string{"iptables", "ip6tables"} {
+			_, _ = runCmd(cmdTimeout, bin, "-D", "INPUT", "-j", iptablesChain)
+			_, _ = runCmd(cmdTimeout, bin, "-F", iptablesChain)
+			_, _ = runCmd(cmdTimeout, bin, "-X", iptablesChain)
+		}
+	}
+}
+
 func dockerPresent() bool {
 	out, err := runCmd(cmdTimeout, "iptables", "-S")
 	if err != nil {
@@ -148,6 +178,7 @@ func (b linuxBackend) apply(intent v2.FirewallIntent, holes []v2.FirewallHole) e
 	if err := applyPing(intent.BlockPing4, intent.BlockPing6); err != nil {
 		return err
 	}
+	clearOtherBackend(b.kind)
 	switch b.kind {
 	case v2.FirewallBackendUFW:
 		return applyUFW(intent, holes)

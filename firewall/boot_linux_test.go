@@ -56,6 +56,8 @@ func TestFirewallBootUnitFollowsHostFirewall(t *testing.T) {
 	for _, want := range []string{
 		"After=",
 		"nftables.service",
+		"fail2ban.service",
+		"bt.service",
 		"1panel.service",
 		"ExecStart=",
 		bootScriptFile,
@@ -65,7 +67,7 @@ func TestFirewallBootUnitFollowsHostFirewall(t *testing.T) {
 		}
 	}
 	if strings.Contains(unit, "Before=ssh") {
-		t.Fatal("boot unit must not delay sshd; agent watch restores after 1Panel flush")
+		t.Fatal("boot unit must not delay sshd; agent watch restores after a later host flush")
 	}
 }
 
