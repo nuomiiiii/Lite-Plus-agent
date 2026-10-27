@@ -106,6 +106,8 @@ var RootCmd = &cobra.Command{
 
 		log.Println("Lite-Plus Agent", update.CurrentVersion)
 		log.Println("Github Repo:", update.Repo)
+		server.RestorePersistedFirewall()
+		go server.WatchPersistedFirewall()
 
 		// 设置 DNS 解析行为
 		if flags.CustomDNS != "" {
@@ -146,7 +148,6 @@ var RootCmd = &cobra.Command{
 		}
 		go server.DoUploadBasicInfoWorks()
 		go server.DoRuntimeConfigStateUploadWorks()
-		server.RestorePersistedFirewall()
 		for {
 			server.UpdateBasicInfo()
 			server.EstablishWebSocketConnection()

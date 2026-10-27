@@ -51,19 +51,21 @@ COMMIT
 	}
 }
 
-func TestFirewallBootUnitRunsBeforeSSH(t *testing.T) {
+func TestFirewallBootUnitFollowsHostFirewall(t *testing.T) {
 	unit := firewallBootUnit()
 	for _, want := range []string{
 		"After=",
 		"nftables.service",
 		"1panel.service",
-		"Before=network-online.target ssh.service sshd.service",
 		"ExecStart=",
 		bootScriptFile,
 	} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("missing %q in %s", want, unit)
 		}
+	}
+	if strings.Contains(unit, "Before=ssh") {
+		t.Fatal("boot unit must not delay sshd; agent watch restores after 1Panel flush")
 	}
 }
 

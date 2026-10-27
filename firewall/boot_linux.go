@@ -118,10 +118,7 @@ exit 0
 func firewallBootUnit() string {
 	return `[Unit]
 Description=Lite Plus host firewall
-DefaultDependencies=no
-After=systemd-sysctl.service nftables.service iptables.service netfilter-persistent.service iptables-persistent.service ufw.service firewalld.service 1panel.service 1Panel.service
-Before=network-online.target ssh.service sshd.service
-Wants=network-pre.target
+After=nftables.service iptables.service netfilter-persistent.service iptables-persistent.service ufw.service firewalld.service 1panel.service 1Panel.service network-pre.target
 
 [Service]
 Type=oneshot

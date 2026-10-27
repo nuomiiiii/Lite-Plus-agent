@@ -14,6 +14,10 @@ func RestorePersistedFirewall() {
 	}
 }
 
+func WatchPersistedFirewall() {
+	firewall.WatchOwned()
+}
+
 func processFirewallEvent(conn *ws.SafeConn, method string, params interface{}) bool {
 	switch method {
 	case v2.MethodAgentFirewallSnapshot:

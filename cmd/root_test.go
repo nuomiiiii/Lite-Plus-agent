@@ -80,6 +80,23 @@ func TestRootCmdEnablesAutoUpdateByDefault(t *testing.T) {
 	}
 }
 
+func TestRootRestoresFirewallBeforeAutoUpdate(t *testing.T) {
+	raw, err := os.ReadFile("root.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	restore := strings.Index(text, "server.RestorePersistedFirewall()")
+	watch := strings.Index(text, "go server.WatchPersistedFirewall()")
+	update := strings.Index(text, "update.CheckAndUpdate()")
+	if restore < 0 || watch < 0 || update < 0 {
+		t.Fatal("startup must restore firewall and watch owned rules")
+	}
+	if restore > update || watch > update {
+		t.Fatal("firewall must be restored before CheckAndUpdate so reboot is not a wait-then-deny window")
+	}
+}
+
 func TestLoadEffectiveConfigPrecedence(t *testing.T) {
 	tests := []struct {
 		name      string

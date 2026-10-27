@@ -65,6 +65,13 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(text, "persistBootLocked(") {
 		t.Fatal("apply and restore must persist the owned table for reboot")
 	}
+	watch, err := os.ReadFile("watch.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(watch), "engOwned(") || !strings.Contains(string(watch), "restorePersistedLocked()") {
+		t.Fatal("watch must put plus allow ports back after a later host flush")
+	}
 	bootLinux, err := os.ReadFile("boot_linux.go")
 	if err != nil {
 		t.Fatal(err)
@@ -74,8 +81,8 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(bootShared), "lite-plus-firewall.service") || !strings.Contains(bootText, "Before=network-online.target ssh.service") {
-		t.Fatal("boot unit must load all plus ports before sshd")
+	if !strings.Contains(string(bootShared), "lite-plus-firewall.service") || !strings.Contains(bootText, "1panel.service") {
+		t.Fatal("boot unit must load plus ports after nftables/1Panel")
 	}
 	if !strings.Contains(bootText, "ownedIptablesRestore(") || !strings.Contains(bootText, "nftTableScript(") {
 		t.Fatal("boot persist must keep every plus allow port, not only ssh")
