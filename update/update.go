@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	CurrentVersion string = "0.0.1.6"
+	CurrentVersion string = "0.0.1.7"
 	// Repo is the Plus agent GitHub release channel. Do not point at Lite-agent.
 	Repo string = "nuomiiiii/Lite-Plus-agent"
 )

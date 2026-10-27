@@ -7,7 +7,13 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing/common"
 	N "github.com/sagernet/sing/common/network"
+)
+
+var (
+	_ common.WithUpstream = (*ipLimitConn)(nil)
+	_ common.WithUpstream = (*ipLimitPacketConn)(nil)
 )
 
 type ipLimitTracker struct {
@@ -82,6 +88,13 @@ func (c *ipLimitConn) Close() error {
 	return c.Conn.Close()
 }
 
+func (c *ipLimitConn) Upstream() any {
+	return c.Conn
+}
+
+func (c *ipLimitConn) ReaderReplaceable() bool { return true }
+func (c *ipLimitConn) WriterReplaceable() bool { return true }
+
 type ipLimitPacketConn struct {
 	N.PacketConn
 	once    sync.Once
@@ -94,3 +107,10 @@ func (c *ipLimitPacketConn) Close() error {
 	}
 	return c.PacketConn.Close()
 }
+
+func (c *ipLimitPacketConn) Upstream() any {
+	return c.PacketConn
+}
+
+func (c *ipLimitPacketConn) ReaderReplaceable() bool { return true }
+func (c *ipLimitPacketConn) WriterReplaceable() bool { return true }

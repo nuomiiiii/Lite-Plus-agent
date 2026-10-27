@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,7 +17,9 @@ import (
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/features/routing"
+	"github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/transport"
+	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/pipe"
 )
 
@@ -126,6 +129,45 @@ func (c *captureDispatcher) DispatchLink(_ context.Context, _ xnet.Destination, 
 	c.mu.Unlock()
 	close(c.done)
 	return nil
+}
+
+func TestRecoveringInboundCatchesProcessPanic(t *testing.T) {
+	err := recoveringInbound{Inbound: panicInbound{}}.Process(context.Background(), xnet.Network_UDP, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "buffer overflow") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+type panicInbound struct{}
+
+func (panicInbound) Network() []xnet.Network {
+	return []xnet.Network{xnet.Network_UDP}
+}
+
+func (panicInbound) Process(context.Context, xnet.Network, stat.Connection, routing.Dispatcher) error {
+	panic("buffer overflow: capacity 8192,start 0, need 47")
+}
+
+type stubWorker struct {
+	proxy proxy.Inbound
+}
+
+type stubHandler struct {
+	workers []any
+}
+
+func TestWrapHandlerWorkerProxyRecovers(t *testing.T) {
+	h := &stubHandler{workers: []any{&stubWorker{proxy: panicInbound{}}}}
+	wrapHandlerWorkerProxy(h)
+	w := h.workers[0].(*stubWorker)
+	got, ok := w.proxy.(recoveringInbound)
+	if !ok {
+		t.Fatalf("proxy became %T", w.proxy)
+	}
+	err := got.Process(context.Background(), xnet.Network_UDP, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "buffer overflow") {
+		t.Fatalf("got %v", err)
+	}
 }
 
 func setMuxSessionIO(t *testing.T, s *mux.Session, reader buf.Reader, writer buf.Writer) {

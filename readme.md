@@ -2,7 +2,7 @@
 
 Lite-Plus 的跨平台节点监控与节点管理 Agent。本仓库版本在基础监控之外，支持安全远程终端、文件管理、远程命令、Cloudflare Access、在线配置下发、配置结果回执，以及双核节点管理。
 
-当前稳定版本：`0.0.1.6`
+当前稳定版本：`0.0.1.7`
 
 使用 MCP 代理功能，Lite需升级至 2.3.3 或更高版本。
 
@@ -59,7 +59,7 @@ docker pull ghcr.io/nuomiiiii/lite-plus-agent:latest
 也可以拉取固定版本：
 
 ```bash
-docker pull ghcr.io/nuomiiiii/lite-plus-agent:0.0.1.6
+docker pull ghcr.io/nuomiiiii/lite-plus-agent:0.0.1.7
 ```
 
 容器的启动参数、宿主机目录挂载和节点 Token 请以 Lite 后台生成的部署命令为准。Docker 部署不会在容器内替换 Agent 二进制；升级时需拉取新镜像并重建容器。
@@ -223,6 +223,7 @@ Client ID 与 Client Secret 必须成对配置，可以选择命令行参数、�
 
 | 版本 | 主要内容 |
 | --- | --- |
+| `0.0.1.7` | 修复 sing-box 开启设备数限制后，Shadowsocks UDP 等连接因包头空间不够而异常的 bug。修复 Xray 入站处理异常时可能把整个 Agent 打崩的 bug。 |
 | `0.0.1.6` | 防火墙规则可不指定端口，表示全部端口。修复同步主机规则时，自定义链里的简单入站（如 1Panel）收不进 Plus 的 bug。没写端口的按全部端口处理。修复已关闭的 Xray 出站和路由仍会被写进配置的 bug。 |
 | `0.0.1.5` | 远程控制打开后，可在 Plus 后台管理本机入站防火墙：规则、禁止 ping、入站默认拒绝。Linux 支持 nft / iptables / ufw / firewalld，Windows 走系统防火墙。默认拒绝会留下回环、已建立连接，以及 SSH / 远程桌面 / WinRM；SSH 端口可改。失败会回滚。节点出站可按后台设置走仅 IPv4、仅 IPv6、优先 IPv4 或优先 IPv6。 |
 | `0.0.1.4` | sing-box 的 VLESS 入站会写入用户或入站上的 Flow（Vision）。WebSocket、明文入站不会带。`xtls-rprx-vision-udp443` 在 sing-box 上会收成 `xtls-rprx-vision`；Xray 仍可用 udp443。配 Lite-Plus `0.0.7`，主控和节点要一起升。 |

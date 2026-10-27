@@ -21,6 +21,7 @@ import (
 	"github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/pipe"
 )
 
@@ -302,6 +303,78 @@ func wrapXrayDispatcher(inst *xraycore.Instance, policy *policyEngine) {
 	next := &ipLimitDispatcher{Dispatcher: inner, policy: policy}
 	replaceXrayFeature(inst, inner, next)
 	patchInboundMuxDispatchers(inst, next)
+	wrapWorkerProxyRecover(inst)
+}
+
+type recoveringInbound struct {
+	proxy.Inbound
+}
+
+func (p recoveringInbound) Process(ctx context.Context, network xnet.Network, conn stat.Connection, dispatcher routing.Dispatcher) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("inbound panic: %v", rec)
+		}
+	}()
+	return p.Inbound.Process(ctx, network, conn, dispatcher)
+}
+
+func wrapWorkerProxyRecover(inst *xraycore.Instance) {
+	feat := inst.GetFeature(inbound.ManagerType())
+	mgr, ok := feat.(inbound.Manager)
+	if !ok || mgr == nil {
+		return
+	}
+	for _, h := range mgr.ListHandlers(context.Background()) {
+		wrapHandlerWorkerProxy(h)
+	}
+}
+
+func wrapHandlerWorkerProxy(h any) {
+	v := reflect.ValueOf(h)
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return
+	}
+	workers := v.FieldByName("workers")
+	if !workers.IsValid() || workers.Kind() != reflect.Slice {
+		return
+	}
+	for i := 0; i < workers.Len(); i++ {
+		w := workers.Index(i)
+		if w.Kind() == reflect.Interface {
+			if w.IsNil() {
+				continue
+			}
+			w = w.Elem()
+		}
+		if w.Kind() == reflect.Ptr {
+			if w.IsNil() {
+				continue
+			}
+			w = w.Elem()
+		}
+		if w.Kind() != reflect.Struct {
+			continue
+		}
+		field := w.FieldByName("proxy")
+		if !field.IsValid() {
+			continue
+		}
+		cur, ok := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Interface().(proxy.Inbound)
+		if !ok || cur == nil {
+			continue
+		}
+		if _, already := cur.(recoveringInbound); already {
+			continue
+		}
+		reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(recoveringInbound{Inbound: cur}))
+	}
 }
 
 func patchInboundMuxDispatchers(inst *xraycore.Instance, wrap routing.Dispatcher) {
