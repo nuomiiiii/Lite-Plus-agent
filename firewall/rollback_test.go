@@ -90,8 +90,15 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if end := strings.Index(restoreFn, "\nfunc "); end > 0 {
 		restoreFn = restoreFn[:end]
 	}
-	if !strings.Contains(restoreFn, "mergeHoles(") || !strings.Contains(restoreFn, "eng.apply(") {
-		t.Fatal("restore on upgrade must re-apply persisted allow ports through the current backend")
+	if !strings.Contains(restoreFn, "mergeHoles(") || !strings.Contains(restoreFn, "eng.apply(") || !strings.Contains(restoreFn, "state.Intent") {
+		t.Fatal("restore on upgrade must re-apply persisted plus rules through the current backend")
+	}
+	keepLinux, err := os.ReadFile("keep_linux.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(keepLinux), "detectedPanelListenPorts") || strings.Contains(string(keepLinux), "parsePanelListenPorts") {
+		t.Fatal("upgrade migrate must use persisted plus rules, not guessed panel listen ports")
 	}
 	watch, err := os.ReadFile("watch.go")
 	if err != nil {
