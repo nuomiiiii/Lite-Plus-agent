@@ -88,6 +88,9 @@ func Apply(intent v2.FirewallIntent, holes []v2.FirewallHole) v2.FirewallResultP
 		result.Error = "agent lost the control plane after apply; previous rules restored"
 		return result
 	}
+	if port := sshPortOf(intent); port != "" {
+		intent.SshPort = port
+	}
 	if err := persistState(intent, holes); err != nil {
 		if needSSH {
 			restoreSSHConfigs(sshSnap)
@@ -97,6 +100,7 @@ func Apply(intent v2.FirewallIntent, holes []v2.FirewallHole) v2.FirewallResultP
 		result.Error = err.Error()
 		return result
 	}
+	_ = persistBootLocked(eng, intent, holes)
 	live := withStacks(eng.snapshot())
 	live.Kind = v2.FirewallKindApply
 	live.Status = v2.FirewallStatusOK
@@ -224,41 +228,49 @@ func rollbackApply(prev []byte, ping4, ping6 bool) {
 	}
 	restoreAux(ping4, ping6)
 	if loadPersist() != nil {
-		restorePersistedLocked()
+		_ = restorePersistedLocked()
 		return
 	}
 	_ = currentBackend().resetOwned()
+	_ = persistBootLocked(currentBackend(), v2.FirewallIntent{}, nil)
 }
 
 func rollbackAdopt(prev []byte) {
 	if len(prev) > 0 {
 		_ = currentBackend().restore(prev)
 	}
-	restorePersistedLocked()
+	_ = restorePersistedLocked()
 }
 
-func RestorePersisted() {
+func RestorePersisted() error {
 	opMu.Lock()
 	defer opMu.Unlock()
-	restorePersistedLocked()
+	return restorePersistedLocked()
 }
 
-func restorePersistedLocked() {
+func restorePersistedLocked() error {
 	state := loadPersist()
 	if state == nil {
-		return
+		return nil
 	}
 	lastWindowsPolicy = state.WindowsPolicy
 	eng := currentBackend()
 	snap := eng.snapshot()
 	if !snap.Supported || !snap.Privileged {
-		return
+		return nil
+	}
+	if port := sshPortOf(state.Intent); port != "" {
+		state.Intent.SshPort = port
 	}
 	holes := state.ListenHoles
 	if len(holes) == 0 {
 		holes = holesFromIntent(state.Intent)
 	}
-	_ = eng.apply(state.Intent, holes)
+	if err := eng.apply(state.Intent, holes); err != nil {
+		return err
+	}
+	_ = persistState(state.Intent, holes)
+	return persistBootLocked(eng, state.Intent, holes)
 }
 
 func holesFromIntent(intent v2.FirewallIntent) []v2.FirewallHole {

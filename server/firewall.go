@@ -9,7 +9,9 @@ import (
 )
 
 func RestorePersistedFirewall() {
-	firewall.RestorePersisted()
+	if err := firewall.RestorePersisted(); err != nil {
+		log.Printf("firewall restore: %v", err)
+	}
 }
 
 func processFirewallEvent(conn *ws.SafeConn, method string, params interface{}) bool {

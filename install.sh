@@ -891,7 +891,7 @@ elif [ "$init_system" = "systemd" ]; then
     cat > "$service_file" << EOF
 [Unit]
 Description=Lite-Plus Agent Service
-After=network.target
+After=network.target lite-plus-firewall.service ssh.service sshd.service
 
 [Service]
 Type=simple

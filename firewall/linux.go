@@ -612,6 +612,21 @@ func applyNFT(intent v2.FirewallIntent, holes []v2.FirewallHole) error {
 	if intentIdle(intent) {
 		return nil
 	}
+	tmp, err := os.CreateTemp("", "liteplus-nft-*.nft")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(nftTableScript(intent, holes)); err != nil {
+		tmp.Close()
+		return err
+	}
+	tmp.Close()
+	_, err = runCmd(cmdTimeout, "nft", "-f", tmp.Name())
+	return err
+}
+
+func nftTableScript(intent v2.FirewallIntent, holes []v2.FirewallHole) string {
 	var b strings.Builder
 	b.WriteString("table inet " + nftTable + " {\n")
 	b.WriteString("  chain input {\n")
@@ -654,18 +669,7 @@ func applyNFT(intent v2.FirewallIntent, holes []v2.FirewallHole) error {
 		}
 	}
 	b.WriteString("  }\n}\n")
-	tmp, err := os.CreateTemp("", "liteplus-nft-*.nft")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.WriteString(b.String()); err != nil {
-		tmp.Close()
-		return err
-	}
-	tmp.Close()
-	_, err = runCmd(cmdTimeout, "nft", "-f", tmp.Name())
-	return err
+	return b.String()
 }
 
 func nftRule(rule v2.FirewallRule) string {
@@ -922,16 +926,21 @@ func applyFirewalld(intent v2.FirewallIntent, holes []v2.FirewallHole) error {
 	if intentIdle(intent) {
 		return nil
 	}
-	_, _ = runCmd(cmdTimeout, "firewall-cmd", "--direct", "--add-chain", "ipv4", "filter", iptablesChain)
-	_, _ = runCmd(cmdTimeout, "firewall-cmd", "--direct", "--add-chain", "ipv6", "filter", iptablesChain)
-	_, _ = runCmd(cmdTimeout, "firewall-cmd", "--direct", "--add-rule", "ipv4", "filter", "INPUT", "0", "-j", iptablesChain)
-	_, _ = runCmd(cmdTimeout, "firewall-cmd", "--direct", "--add-rule", "ipv6", "filter", "INPUT", "0", "-j", iptablesChain)
+	for _, perm := range []bool{false, true} {
+		_ = firewalldDirect(perm, "--add-chain", "ipv4", "filter", iptablesChain)
+		_ = firewalldDirect(perm, "--add-chain", "ipv6", "filter", iptablesChain)
+		_ = firewalldDirect(perm, "--add-rule", "ipv4", "filter", "INPUT", "0", "-j", iptablesChain)
+		_ = firewalldDirect(perm, "--add-rule", "ipv6", "filter", "INPUT", "0", "-j", iptablesChain)
+	}
 	prio := 1
 	add := func(family string, args []string) error {
-		cmd := append([]string{"--direct", "--add-rule", family, "filter", iptablesChain, strconv.Itoa(prio)}, args...)
+		cmd := append([]string{"--add-rule", family, "filter", iptablesChain, strconv.Itoa(prio)}, args...)
 		prio++
-		_, err := runCmd(cmdTimeout, "firewall-cmd", cmd...)
-		return err
+		if err := firewalldDirect(false, cmd...); err != nil {
+			return err
+		}
+		_ = firewalldDirect(true, cmd...)
+		return nil
 	}
 	if stackAllowed(v2.FirewallStackV4) {
 		_ = add("ipv4", []string{"-i", "lo", "-j", "ACCEPT"})
@@ -1014,7 +1023,18 @@ func applyFirewalld(intent v2.FirewallIntent, holes []v2.FirewallHole) error {
 }
 
 func removeFirewalldChain(family string) {
-	_, _ = runCmd(cmdTimeout, "firewall-cmd", "--direct", "--remove-rule", family, "filter", "INPUT", "0", "-j", iptablesChain)
-	_, _ = runCmd(cmdTimeout, "firewall-cmd", "--direct", "--remove-chain", family, "filter", iptablesChain)
+	for _, perm := range []bool{false, true} {
+		_ = firewalldDirect(perm, "--remove-rule", family, "filter", "INPUT", "0", "-j", iptablesChain)
+		_ = firewalldDirect(perm, "--remove-chain", family, "filter", iptablesChain)
+	}
+}
+
+func firewalldDirect(permanent bool, args ...string) error {
+	cmd := append([]string{"--direct"}, args...)
+	if permanent {
+		cmd = append([]string{"--permanent"}, cmd...)
+	}
+	_, err := runCmd(cmdTimeout, "firewall-cmd", cmd...)
+	return err
 }
 

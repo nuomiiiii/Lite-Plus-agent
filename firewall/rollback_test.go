@@ -62,6 +62,24 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(textLinux, `nft", "list", "table"`) {
 		t.Fatal("nft apply dump must capture only the plus table")
 	}
+	if !strings.Contains(text, "persistBootLocked(") {
+		t.Fatal("apply and restore must persist the owned table for reboot")
+	}
+	bootLinux, err := os.ReadFile("boot_linux.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootText := string(bootLinux)
+	bootShared, err := os.ReadFile("boot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bootShared), "lite-plus-firewall.service") || !strings.Contains(bootText, "Before=network-online.target ssh.service") {
+		t.Fatal("boot unit must load all plus ports before sshd")
+	}
+	if !strings.Contains(bootText, "ownedIptablesRestore(") || !strings.Contains(bootText, "nftTableScript(") {
+		t.Fatal("boot persist must keep every plus allow port, not only ssh")
+	}
 	if !strings.Contains(textLinux, "NFT_HOST_V1") || !strings.Contains(textLinux, `nft", "list", "ruleset"`) {
 		t.Fatal("nft adopt dump must capture the full host ruleset")
 	}
@@ -83,6 +101,9 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	}
 	if !strings.Contains(textLinux, "deleteFirewalldPermanent") || !strings.Contains(textLinux, "addFirewalldPermanent") {
 		t.Fatal("firewalld adopt must undo permanent deletes if they fail")
+	}
+	if !strings.Contains(textLinux, "func firewalldDirect(") || !strings.Contains(textLinux, "firewalldDirect(true,") {
+		t.Fatal("firewalld apply must also write permanent direct rules so reboot keeps all plus ports")
 	}
 	if !strings.Contains(textLinux, "firewalldDump()") || !strings.Contains(textLinux, `--permanent", "--list-services"`) {
 		t.Fatal("firewalld adopt dump must snapshot permanent services and ports")

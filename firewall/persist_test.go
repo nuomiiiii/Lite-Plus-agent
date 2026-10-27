@@ -61,7 +61,20 @@ func TestPersistStateDoesNotKeepUfwIncoming(t *testing.T) {
 
 func TestRestorePersistedMissingState(t *testing.T) {
 	t.Setenv("AGENT_DATA_DIR", t.TempDir())
-	RestorePersisted()
+	if err := RestorePersisted(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPersistStateWritesResolvedSSHPort(t *testing.T) {
+	t.Setenv("AGENT_DATA_DIR", t.TempDir())
+	if err := persistState(v2.FirewallIntent{Revision: 4, DefaultDeny4: true, SshPort: "2200"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := loadPersist()
+	if got == nil || got.Intent.SshPort != "2200" {
+		t.Fatalf("%+v", got)
+	}
 }
 
 func TestHolesFromIntentAndIdle(t *testing.T) {
