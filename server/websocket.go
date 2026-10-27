@@ -48,6 +48,8 @@ func currentV2PullCapabilities() ([]string, map[string]int) {
 	if pkg_flags.RemoteControlEnabled() {
 		caps = append(caps, v2.CapabilityMCPFull)
 		versions[v2.CapabilityMCPFull] = v2.MCPFullVersion
+		caps = append(caps, v2.CapabilityFirewall)
+		versions[v2.CapabilityFirewall] = v2.FirewallVersion
 	}
 	return caps, versions
 }
@@ -547,6 +549,8 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 		}
 		log.Printf("nodemgt.control received before runtime start")
 		return true
+	case v2.MethodAgentFirewallSnapshot, v2.MethodAgentFirewallApply, v2.MethodAgentFirewallAdopt:
+		return processFirewallEvent(conn, method, params)
 	case v2.MethodAgentMessage, v2.MethodAgentEvent:
 		log.Printf("received v2 %s: %+v", method, params)
 		return true

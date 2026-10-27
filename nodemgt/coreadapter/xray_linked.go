@@ -29,9 +29,11 @@ type xrayCore struct {
 	denied      map[string]struct{}
 	lastUsers   []UserSpec
 	lastIn      []InboundSpec
-	lastOut     []OutboundSpec
-	lastRoutes  []RouteSpec
-	lastTraffic map[string]int64
+	lastOut      []OutboundSpec
+	lastRoutes   []RouteSpec
+	dialStack    string
+	lastDialStack string
+	lastTraffic  map[string]int64
 	lastSeen    map[string]int64
 	fronts      []*spliceFront
 	policy      *policyEngine
@@ -42,6 +44,12 @@ func (c *xrayCore) SetForwarding(outbounds []OutboundSpec, routes []RouteSpec) {
 	defer c.mu.Unlock()
 	c.outbounds = append([]OutboundSpec(nil), outbounds...)
 	c.routes = append([]RouteSpec(nil), routes...)
+}
+
+func (c *xrayCore) SetDialStack(stack string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.dialStack = NormalizeDialStack(stack)
 }
 
 func newXrayCore() *xrayCore {
@@ -236,7 +244,7 @@ func (c *xrayCore) Presence() []Presence {
 
 func (c *xrayCore) applyIfChangedLocked() error {
 	nextUsers := applyDenied(c.users, c.denied)
-	if !coreShouldRestart(c.inst != nil, c.inbounds, c.lastIn, nextUsers, c.lastUsers, c.outbounds, c.lastOut, c.routes, c.lastRoutes) {
+	if !coreShouldRestart(c.inst != nil, c.inbounds, c.lastIn, nextUsers, c.lastUsers, c.outbounds, c.lastOut, c.routes, c.lastRoutes) && c.dialStack == c.lastDialStack {
 		if c.inst == nil && len(c.inbounds) == 0 {
 			c.rememberGood()
 		}
@@ -262,6 +270,7 @@ func (c *xrayCore) restartLocked() error {
 	live := liveUsers(c.users, c.denied, c.inbounds)
 	raw, n, fronts, err := c.buildConfig(live, c.inbounds, c.outbounds, c.routes)
 	if err != nil {
+		c.dialStack = c.lastDialStack
 		return err
 	}
 	_ = c.stopLocked()
@@ -292,6 +301,7 @@ func (c *xrayCore) rememberGood() {
 	c.lastIn = append([]InboundSpec(nil), c.inbounds...)
 	c.lastOut = append([]OutboundSpec(nil), c.outbounds...)
 	c.lastRoutes = append([]RouteSpec(nil), c.routes...)
+	c.lastDialStack = c.dialStack
 }
 
 func (c *xrayCore) restoreLastGood() {
@@ -299,18 +309,22 @@ func (c *xrayCore) restoreLastGood() {
 		return
 	}
 	live := liveUsers(c.lastUsers, c.denied, c.lastIn)
+	attempted := c.dialStack
+	c.dialStack = c.lastDialStack
 	raw, n, fronts, err := c.buildConfig(live, c.lastIn, c.lastOut, c.lastRoutes)
 	if err != nil || n == 0 {
+		c.dialStack = attempted
 		return
 	}
 	inst, err := startXrayInstance(raw, c.policy)
 	if err != nil {
+		c.dialStack = attempted
 		return
 	}
 	c.inst = inst
 	c.policy.sync(live, c.denied)
-	started, err := startPolicyFronts(c.policy, fronts)
-	if err == nil {
+	started, ferr := startPolicyFronts(c.policy, fronts)
+	if ferr == nil {
 		c.fronts = started
 	}
 	c.inbounds = append([]InboundSpec(nil), c.lastIn...)
@@ -513,6 +527,7 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 	if len(rules) > 0 {
 		cfg["routing"] = map[string]any{"domainStrategy": "AsIs", "rules": rules}
 	}
+	applyXrayDialStack(obs, c.dialStack)
 	raw, err := json.Marshal(cfg)
 	return raw, len(items), fronts, err
 }

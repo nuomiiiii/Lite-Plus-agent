@@ -78,8 +78,8 @@ func TestV2PullAdvertisesMCPFullOnlyWhenRemoteControlEnabled(t *testing.T) {
 	pkg_flags.GlobalConfig.RemoteControlEnabled = false
 	caps, versions := currentV2PullCapabilities()
 	for _, capability := range caps {
-		if capability == "mcp_full" {
-			t.Fatal("disabled remote control must not advertise mcp_full")
+		if capability == "mcp_full" || capability == "firewall" {
+			t.Fatal("disabled remote control must not advertise " + capability)
 		}
 	}
 	if _, ok := versions["mcp_full"]; ok {
@@ -100,6 +100,19 @@ func TestV2PullAdvertisesMCPFullOnlyWhenRemoteControlEnabled(t *testing.T) {
 	}
 	if versions["mcp_full"] != 1 {
 		t.Fatalf("mcp_full version = %d, want 1", versions["mcp_full"])
+	}
+	foundFirewall := false
+	for _, capability := range caps {
+		if capability == "firewall" {
+			foundFirewall = true
+			break
+		}
+	}
+	if !foundFirewall {
+		t.Fatalf("enabled remote control must advertise firewall: %v", caps)
+	}
+	if versions["firewall"] != 1 {
+		t.Fatalf("firewall version = %d, want 1", versions["firewall"])
 	}
 }
 

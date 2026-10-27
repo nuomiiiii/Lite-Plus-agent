@@ -11,6 +11,37 @@ import (
 	singjson "github.com/sagernet/sing/common/json"
 )
 
+func TestXrayDialStackWritesFreedomStrategy(t *testing.T) {
+	c := newXrayCore()
+	c.SetDialStack("prefer_ipv4")
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"domainStrategy":"UseIPv4v6"`) {
+		t.Fatalf("missing freedom strategy: %s", raw)
+	}
+}
+
+func TestSingBoxDialStackWritesResolver(t *testing.T) {
+	c := newSingBoxCore()
+	c.SetDialStack("ipv4")
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, part := range []string{`"type":"local"`, `"ipv4_only"`, `"default_domain_resolver"`} {
+		if !strings.Contains(text, part) {
+			t.Fatalf("missing %s in %s", part, text)
+		}
+	}
+	ctx := include.Context(context.Background())
+	if _, err := singjson.UnmarshalExtendedContext[option.Options](ctx, raw); err != nil {
+		t.Fatalf("sing-box options: %v\n%s", err, text)
+	}
+}
+
 func TestXrayConfigAppliesSniffingStreamAndRoutes(t *testing.T) {
 	c := newXrayCore()
 	c.users = []UserSpec{{ID: "u1", UUID: vlessAlice, Flow: "xtls-rprx-vision"}}

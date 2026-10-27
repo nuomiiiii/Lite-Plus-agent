@@ -28,11 +28,13 @@ type singBoxCore struct {
 	outbounds  []OutboundSpec
 	routes     []RouteSpec
 	denied     map[string]struct{}
-	lastUsers  []UserSpec
-	lastIn     []InboundSpec
-	lastOut    []OutboundSpec
-	lastRoutes []RouteSpec
-	fronts     []*spliceFront
+	lastUsers     []UserSpec
+	lastIn        []InboundSpec
+	lastOut       []OutboundSpec
+	lastRoutes    []RouteSpec
+	dialStack     string
+	lastDialStack string
+	fronts        []*spliceFront
 	policy     *policyEngine
 }
 
@@ -41,6 +43,12 @@ func (c *singBoxCore) SetForwarding(outbounds []OutboundSpec, routes []RouteSpec
 	defer c.mu.Unlock()
 	c.outbounds = append([]OutboundSpec(nil), outbounds...)
 	c.routes = append([]RouteSpec(nil), routes...)
+}
+
+func (c *singBoxCore) SetDialStack(stack string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.dialStack = NormalizeDialStack(stack)
 }
 
 func newSingBoxCore() *singBoxCore {
@@ -126,7 +134,7 @@ func (c *singBoxCore) Presence() []Presence {
 
 func (c *singBoxCore) applyIfChangedLocked() error {
 	nextUsers := applyDenied(c.users, c.denied)
-	if !coreShouldRestart(c.inst != nil, c.inbounds, c.lastIn, nextUsers, c.lastUsers, c.outbounds, c.lastOut, c.routes, c.lastRoutes) {
+	if !coreShouldRestart(c.inst != nil, c.inbounds, c.lastIn, nextUsers, c.lastUsers, c.outbounds, c.lastOut, c.routes, c.lastRoutes) && c.dialStack == c.lastDialStack {
 		if c.inst == nil && len(c.inbounds) == 0 {
 			c.rememberGood()
 		}
@@ -156,6 +164,7 @@ func (c *singBoxCore) restartLocked() error {
 	live := liveUsers(c.users, c.denied, c.inbounds)
 	raw, n, fronts, err := c.buildConfig(live, c.inbounds, c.outbounds, c.routes)
 	if err != nil {
+		c.dialStack = c.lastDialStack
 		return err
 	}
 	_ = c.stopLocked()
@@ -188,6 +197,7 @@ func (c *singBoxCore) rememberGood() {
 	c.lastIn = append([]InboundSpec(nil), c.inbounds...)
 	c.lastOut = append([]OutboundSpec(nil), c.outbounds...)
 	c.lastRoutes = append([]RouteSpec(nil), c.routes...)
+	c.lastDialStack = c.dialStack
 }
 
 func (c *singBoxCore) restoreLastGood() {
@@ -195,12 +205,16 @@ func (c *singBoxCore) restoreLastGood() {
 		return
 	}
 	live := liveUsers(c.lastUsers, c.denied, c.lastIn)
+	attempted := c.dialStack
+	c.dialStack = c.lastDialStack
 	raw, n, fronts, err := c.buildConfig(live, c.lastIn, c.lastOut, c.lastRoutes)
 	if err != nil || n == 0 {
+		c.dialStack = attempted
 		return
 	}
 	inst, cancel, err := startSingBox(raw)
 	if err != nil {
+		c.dialStack = attempted
 		return
 	}
 	c.inst = inst
@@ -442,13 +456,15 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 		"inbounds":  items,
 		"outbounds": obs,
 	}
+	var route map[string]any
 	if len(rules) > 0 {
-		route := map[string]any{"rules": rules, "final": "direct"}
+		route = map[string]any{"rules": rules, "final": "direct"}
 		if sets := singBoxRuleSets(routes); len(sets) > 0 {
 			route["rule_set"] = sets
 		}
 		cfg["route"] = route
 	}
+	applySingBoxDialStack(cfg, route, c.dialStack)
 	raw, err := json.Marshal(cfg)
 	return raw, len(items), fronts, err
 }

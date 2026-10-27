@@ -348,6 +348,7 @@ func (r *Runtime) applySnapshot(payload json.RawMessage, keepDeny bool) error {
 			CertPath string `json:"cert_path"`
 			KeyPath  string `json:"key_path"`
 		} `json:"certs"`
+		DialStack string `json:"dial_stack"`
 	}
 	if err := json.Unmarshal(payload, &snap); err != nil {
 		return err
@@ -469,6 +470,11 @@ func (r *Runtime) applySnapshot(payload json.RawMessage, keepDeny bool) error {
 			SetForwarding([]coreadapter.OutboundSpec, []coreadapter.RouteSpec)
 		}); ok {
 			setter.SetForwarding(outs, rts)
+		}
+		if setter, ok := core.(interface {
+			SetDialStack(string)
+		}); ok {
+			setter.SetDialStack(snap.DialStack)
 		}
 		if err := core.ApplyUsers(users); err != nil && firstErr == nil {
 			firstErr = err

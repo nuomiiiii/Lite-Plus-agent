@@ -146,6 +146,7 @@ var RootCmd = &cobra.Command{
 		}
 		go server.DoUploadBasicInfoWorks()
 		go server.DoRuntimeConfigStateUploadWorks()
+		server.RestorePersistedFirewall()
 		for {
 			server.UpdateBasicInfo()
 			server.EstablishWebSocketConnection()
