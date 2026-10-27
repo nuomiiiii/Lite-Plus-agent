@@ -80,6 +80,42 @@ func sshConfigIncludesDropins(text string) bool {
 	return false
 }
 
+func parsePanelListenPorts(text string) []string {
+	var ports []string
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || !panelListenLine(line) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		addr := fields[3]
+		if strings.EqualFold(fields[0], "tcp") || strings.EqualFold(fields[0], "tcp6") {
+			addr = fields[3]
+		}
+		if strings.Contains(addr, "Local") {
+			continue
+		}
+		if port := listenAddrPort(addr); port != "" {
+			ports = append(ports, port)
+		}
+	}
+	return uniqueSSHPorts(ports)
+}
+
+func panelListenLine(line string) bool {
+	lower := strings.ToLower(line)
+	if strings.Contains(lower, "lite-plus-agent") {
+		return false
+	}
+	if !strings.Contains(lower, "lite-plus") && !strings.Contains(lower, "liteplus") {
+		return false
+	}
+	return strings.Contains(lower, "listen") || strings.HasPrefix(lower, "tcp")
+}
+
 func parseSSHListenPorts(text string) []string {
 	var ports []string
 	for _, raw := range strings.Split(text, "\n") {

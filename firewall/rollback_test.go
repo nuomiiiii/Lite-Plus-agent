@@ -86,12 +86,19 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(text, "persistBootLocked(") {
 		t.Fatal("apply and restore must persist the owned table for reboot")
 	}
+	restoreFn := text[strings.Index(text, "func restorePersistedLocked("):]
+	if end := strings.Index(restoreFn, "\nfunc "); end > 0 {
+		restoreFn = restoreFn[:end]
+	}
+	if !strings.Contains(restoreFn, "mergeHoles(") || !strings.Contains(restoreFn, "eng.apply(") {
+		t.Fatal("restore on upgrade must re-apply persisted allow ports through the current backend")
+	}
 	watch, err := os.ReadFile("watch.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(watch), "engOwned(") || !strings.Contains(string(watch), "restorePersistedLocked()") {
-		t.Fatal("watch must put plus allow ports back after a later host flush")
+	if !strings.Contains(string(watch), "engOwned(") || !strings.Contains(string(watch), "restorePersistedLocked()") || !strings.Contains(string(watch), "plusRulesStale(") {
+		t.Fatal("watch must restore after a host flush and when plus still sits on a leftover inet table")
 	}
 	bootLinux, err := os.ReadFile("boot_linux.go")
 	if err != nil {

@@ -81,4 +81,7 @@ func TestFirewallBootScriptLoadsNftAndIptables(t *testing.T) {
 	if strings.Contains(script, "flush ruleset") {
 		t.Fatal("boot must not flush the host ruleset")
 	}
+	if !strings.Contains(script, `if [ -f "$V4_FILE" ] || [ -f "$V6_FILE" ]; then`) {
+		t.Fatal("boot must drop leftover inet liteplus when plus already lives in iptables INPUT")
+	}
 }

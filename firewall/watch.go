@@ -29,6 +29,10 @@ func ensureOwned() error {
 	if !snap.Supported || !snap.Privileged {
 		return nil
 	}
+	if plusRulesStale() {
+		log.Printf("firewall plus table is on the wrong hook; moving allow ports onto the host INPUT")
+		return restorePersistedLocked()
+	}
 	if engOwned(eng) {
 		return nil
 	}

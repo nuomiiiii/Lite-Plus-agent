@@ -262,10 +262,7 @@ func restorePersistedLocked() error {
 	if port := sshPortOf(state.Intent); port != "" {
 		state.Intent.SshPort = port
 	}
-	holes := state.ListenHoles
-	if len(holes) == 0 {
-		holes = holesFromIntent(state.Intent)
-	}
+	holes := mergeHoles(state.ListenHoles, holesFromIntent(state.Intent))
 	if err := eng.apply(state.Intent, holes); err != nil {
 		return err
 	}
@@ -299,6 +296,25 @@ func holesFromIntent(intent v2.FirewallIntent) []v2.FirewallHole {
 		})
 	}
 	return holes
+}
+
+func mergeHoles(groups ...[]v2.FirewallHole) []v2.FirewallHole {
+	seen := map[string]struct{}{}
+	out := make([]v2.FirewallHole, 0)
+	for _, group := range groups {
+		for _, hole := range group {
+			if !holeSafe(hole) {
+				continue
+			}
+			key := hole.Stack + "|" + hole.Protocol + "|" + hole.Port
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, hole)
+		}
+	}
+	return out
 }
 
 func intentIdle(intent v2.FirewallIntent) bool {

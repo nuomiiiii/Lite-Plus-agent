@@ -76,6 +76,26 @@ func TestRewriteSSHConfigPortCommentsOldListen(t *testing.T) {
 	}
 }
 
+func TestParsePanelListenPortsSkipsAgent(t *testing.T) {
+	ss := `State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+LISTEN 0 4096 0.0.0.0:28777 0.0.0.0:* users:(("Lite-Plus",pid=8,fd=6))
+LISTEN 0 4096 *:37888 *:* users:(("Lite-Plus",pid=8,fd=7))
+LISTEN 0 128 0.0.0.0:18293 0.0.0.0:* users:(("Lite-Plus-agent",pid=9,fd=3))
+`
+	got := parsePanelListenPorts(ss)
+	if preferSSHPort(got) != "28777" && preferSSHPort(got) != "37888" {
+		t.Fatalf("panel ports: %v", got)
+	}
+	for _, port := range got {
+		if port == "18293" {
+			t.Fatalf("agent listen must not become a panel keep: %v", got)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("want two panel ports, got %v", got)
+	}
+}
+
 func containsLine(text, want string) bool {
 	for _, line := range strings.Split(text, "\n") {
 		if line == want {

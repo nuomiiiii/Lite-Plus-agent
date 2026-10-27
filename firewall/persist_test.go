@@ -95,6 +95,10 @@ func TestHolesFromIntentAndIdle(t *testing.T) {
 	if len(holes) != 1 || holes[0].Port != "443" {
 		t.Fatalf("%+v", holes)
 	}
+	merged := mergeHoles(nil, holes, []v2.FirewallHole{{Protocol: "tcp", Port: "443", Stack: v2.FirewallStackV4}, {Protocol: "tcp", Port: "80", Stack: v2.FirewallStackV4}})
+	if len(merged) != 2 {
+		t.Fatalf("merge holes: %+v", merged)
+	}
 }
 
 func TestLoadPersistLegacyIntent(t *testing.T) {

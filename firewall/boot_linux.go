@@ -92,6 +92,10 @@ V6_FILE="` + v6 + `"
 CHAIN="` + iptablesChain + `"
 TABLE="` + nftTable + `"
 load_nft() {
+	if [ -f "$V4_FILE" ] || [ -f "$V6_FILE" ]; then
+		nft delete table inet "$TABLE" >/dev/null 2>&1 || true
+		return 0
+	fi
 	[ -f "$NFT_FILE" ] || return 0
 	nft delete table inet "$TABLE" >/dev/null 2>&1 || true
 	nft -f "$NFT_FILE"
