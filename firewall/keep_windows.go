@@ -12,5 +12,3 @@ func keepRules(intent v2.FirewallIntent) []v2.FirewallRule {
 	out = append(out, keepTCP(sshPortOf(intent), "SSH")...)
 	return out
 }
-
-func detectedSSHPort() string { return "22" }

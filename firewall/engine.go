@@ -59,19 +59,39 @@ func Apply(intent v2.FirewallIntent, holes []v2.FirewallHole) v2.FirewallResultP
 	}
 	prev, _ := eng.dump()
 	ping4, ping6 := captureAux()
+	needSSH := keepPort(intent.SshPort) != ""
+	var sshSnap []sshFileSnap
+	if needSSH {
+		sshSnap = snapshotSSHConfigs()
+	}
 	if err := eng.apply(intent, holes); err != nil {
 		rollbackApply(prev, ping4, ping6)
 		result.Status = v2.FirewallStatusError
 		result.Error = err.Error()
 		return result
 	}
+	if needSSH {
+		if err := syncSSHListenPort(intent.SshPort); err != nil {
+			restoreSSHConfigs(sshSnap)
+			rollbackApply(prev, ping4, ping6)
+			result.Status = v2.FirewallStatusError
+			result.Error = err.Error()
+			return result
+		}
+	}
 	if !watchdogOK() {
+		if needSSH {
+			restoreSSHConfigs(sshSnap)
+		}
 		rollbackApply(prev, ping4, ping6)
 		result.Status = v2.FirewallStatusRolledBack
 		result.Error = "agent lost the control plane after apply; previous rules restored"
 		return result
 	}
 	if err := persistState(intent, holes); err != nil {
+		if needSSH {
+			restoreSSHConfigs(sshSnap)
+		}
 		rollbackApply(prev, ping4, ping6)
 		result.Status = v2.FirewallStatusError
 		result.Error = err.Error()

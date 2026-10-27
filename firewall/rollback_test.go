@@ -47,6 +47,12 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	textLinux := string(linux)
+	if strings.Contains(textLinux, "func sshPort(") || strings.Contains(textLinux, `strings.Contains(out, "sshd")`) {
+		t.Fatal("linux ssh port must not hardcode 22 when ss only sees sshd")
+	}
+	if !strings.Contains(text, "syncSSHListenPort(") || !strings.Contains(text, "restoreSSHConfigs(") {
+		t.Fatal("apply must sync sshd listen port and restore it on failure")
+	}
 	if !strings.Contains(textLinux, "func (b linuxBackend) resetOwned") || !strings.Contains(textLinux, "clearUfwPlusRules()") {
 		t.Fatal("linux resetOwned must drop nft/ufw plus rules")
 	}

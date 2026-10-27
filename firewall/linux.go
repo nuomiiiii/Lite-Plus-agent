@@ -4,7 +4,6 @@ package firewall
 
 import (
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 
@@ -1010,28 +1009,3 @@ func removeFirewalldChain(family string) {
 	_, _ = runCmd(cmdTimeout, "firewall-cmd", "--direct", "--remove-chain", family, "filter", iptablesChain)
 }
 
-func sshPort() string {
-	raw, err := os.ReadFile("/etc/ssh/sshd_config")
-	if err == nil {
-		for _, line := range strings.Split(string(raw), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(strings.ToLower(line), "port ") {
-				fields := strings.Fields(line)
-				if len(fields) >= 2 {
-					if port := keepPort(fields[1]); port != "" {
-						return port
-					}
-				}
-			}
-		}
-	}
-	if lookPath("ss") {
-		if out, err := runCmd(cmdTimeout, "ss", "-ltnp"); err == nil && strings.Contains(out, "sshd") {
-			return "22"
-		}
-	}
-	if _, err := exec.LookPath("sshd"); err == nil {
-		return "22"
-	}
-	return "22"
-}
