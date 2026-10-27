@@ -172,6 +172,24 @@ func deleteInetPlusTable() {
 	}
 }
 
+func iptablesPlusInputLive(bin string) bool {
+	if _, err := runCmd(cmdTimeout, bin, "-n", "-L", iptablesChain); err != nil {
+		return false
+	}
+	out, err := runCmd(cmdTimeout, bin, "-S", "INPUT")
+	return err == nil && iptablesInputJumpsToPlus(out)
+}
+
+func iptablesPlusLive() bool {
+	if stackAllowed(v2.FirewallStackV4) && !iptablesPlusInputLive("iptables") {
+		return false
+	}
+	if stackAllowed(v2.FirewallStackV6) && lookPath("ip6tables") && !iptablesPlusInputLive("ip6tables") {
+		return false
+	}
+	return true
+}
+
 func dockerPresent() bool {
 	out, err := runCmd(cmdTimeout, "iptables", "-S")
 	if err != nil {
@@ -687,17 +705,18 @@ func nftTableScript(intent v2.FirewallIntent, holes []v2.FirewallHole) string {
 		b.WriteString("    ip6 nexthdr ipv6-icmp icmpv6 type echo-request drop\n")
 	}
 	for _, rule := range enabledRules(intent) {
-		if !stackAllowed(rule.Stack) {
-			continue
-		}
-		b.WriteString("    " + nftRule(rule) + "\n")
+		eachStackedRule(rule, func(next v2.FirewallRule) {
+			b.WriteString("    " + nftRule(next) + "\n")
+		})
 	}
 	if intent.DefaultDeny4 || intent.DefaultDeny6 {
 		for _, hole := range holes {
-			if !stackAllowed(hole.Stack) || !holeSafe(hole) {
+			if !holeSafe(hole) {
 				continue
 			}
-			b.WriteString("    " + nftHole(hole) + "\n")
+			eachStackedRule(v2.FirewallRule{Action: v2.FirewallActionAllow, Protocol: hole.Protocol, Port: hole.Port, Stack: hole.Stack, Comment: hole.Comment}, func(next v2.FirewallRule) {
+				b.WriteString("    " + nftRule(next) + "\n")
+			})
 		}
 		eachKeepRule(intent, func(rule v2.FirewallRule) {
 			b.WriteString("    " + nftRule(rule) + "\n")
@@ -797,23 +816,27 @@ func applyIptablesFamily(bin, stack string, intent v2.FirewallIntent, holes []v2
 		_ = add("-p", "ipv6-icmp", "--icmpv6-type", "router-solicitation", "-j", "ACCEPT")
 		_ = add("-p", "ipv6-icmp", "--icmpv6-type", "router-advertisement", "-j", "ACCEPT")
 		_ = add("-p", "ipv6-icmp", "--icmpv6-type", "packet-too-big", "-j", "ACCEPT")
+		_ = add("-p", "ipv6-icmp", "--icmpv6-type", "destination-unreachable", "-j", "ACCEPT")
+		_ = add("-p", "ipv6-icmp", "--icmpv6-type", "time-exceeded", "-j", "ACCEPT")
+		_ = add("-p", "ipv6-icmp", "--icmpv6-type", "parameter-problem", "-j", "ACCEPT")
 		if intent.BlockPing6 {
 			_ = add("-p", "ipv6-icmp", "--icmpv6-type", "echo-request", "-j", "DROP")
 		}
 	}
 	for _, rule := range enabledRules(intent) {
-		if rule.Stack != stack {
+		if !ruleAppliesToStack(rule, stack) {
 			continue
 		}
-		args := iptablesArgs(rule)
-		if err := add(args...); err != nil {
+		next := rule
+		next.Stack = stack
+		if err := add(iptablesArgs(next)...); err != nil {
 			return err
 		}
 	}
 	deny := (stack == v2.FirewallStackV4 && intent.DefaultDeny4) || (stack == v2.FirewallStackV6 && intent.DefaultDeny6)
 	if deny {
 		for _, hole := range holes {
-			if hole.Stack != stack || !holeSafe(hole) {
+			if !holeSafe(hole) || !holeAppliesToStack(hole, stack) {
 				continue
 			}
 			if err := add(iptablesArgs(v2.FirewallRule{Action: v2.FirewallActionAllow, Protocol: hole.Protocol, Port: hole.Port, Stack: stack})...); err != nil {
@@ -883,28 +906,38 @@ func applyUFW(intent v2.FirewallIntent, holes []v2.FirewallHole) error {
 		return nil
 	}
 	for _, rule := range enabledRules(intent) {
-		if !stackAllowed(rule.Stack) {
-			continue
-		}
-		args := ufwArgs(rule)
-		if _, err := runCmd(cmdTimeout, "ufw", args...); err != nil {
-			return err
+		var ufwErr error
+		eachStackedRule(rule, func(next v2.FirewallRule) {
+			if ufwErr != nil {
+				return
+			}
+			_, ufwErr = runCmd(cmdTimeout, "ufw", ufwArgs(next)...)
+		})
+		if ufwErr != nil {
+			return ufwErr
 		}
 	}
 	if intent.DefaultDeny4 || intent.DefaultDeny6 {
 		for _, hole := range holes {
-			if !stackAllowed(hole.Stack) || !holeSafe(hole) {
+			if !holeSafe(hole) {
 				continue
 			}
-			if _, err := runCmd(cmdTimeout, "ufw", ufwArgs(v2.FirewallRule{
+			var holeErr error
+			eachStackedRule(v2.FirewallRule{
 				Action:   v2.FirewallActionAllow,
 				Protocol: hole.Protocol,
 				Port:     hole.Port,
 				Stack:    hole.Stack,
 				Comment:  hole.Comment,
 				ID:       "hole",
-			})...); err != nil {
-				return err
+			}, func(next v2.FirewallRule) {
+				if holeErr != nil {
+					return
+				}
+				_, holeErr = runCmd(cmdTimeout, "ufw", ufwArgs(next)...)
+			})
+			if holeErr != nil {
+				return holeErr
 			}
 		}
 		var keepErr error
@@ -1012,28 +1045,39 @@ func applyFirewalld(intent v2.FirewallIntent, holes []v2.FirewallHole) error {
 		}
 	}
 	for _, rule := range enabledRules(intent) {
-		if !stackAllowed(rule.Stack) {
-			continue
-		}
-		family := "ipv4"
-		if rule.Stack == v2.FirewallStackV6 {
-			family = "ipv6"
-		}
-		if err := add(family, iptablesArgs(rule)); err != nil {
-			return err
+		var addErr error
+		eachStackedRule(rule, func(next v2.FirewallRule) {
+			if addErr != nil {
+				return
+			}
+			family := "ipv4"
+			if next.Stack == v2.FirewallStackV6 {
+				family = "ipv6"
+			}
+			addErr = add(family, iptablesArgs(next))
+		})
+		if addErr != nil {
+			return addErr
 		}
 	}
 	if intent.DefaultDeny4 || intent.DefaultDeny6 {
 		for _, hole := range holes {
-			if !stackAllowed(hole.Stack) || !holeSafe(hole) {
+			if !holeSafe(hole) {
 				continue
 			}
-			family := "ipv4"
-			if hole.Stack == v2.FirewallStackV6 {
-				family = "ipv6"
-			}
-			if err := add(family, iptablesArgs(v2.FirewallRule{Action: v2.FirewallActionAllow, Protocol: hole.Protocol, Port: hole.Port, Stack: hole.Stack})); err != nil {
-				return err
+			var holeErr error
+			eachStackedRule(v2.FirewallRule{Action: v2.FirewallActionAllow, Protocol: hole.Protocol, Port: hole.Port, Stack: hole.Stack}, func(next v2.FirewallRule) {
+				if holeErr != nil {
+					return
+				}
+				family := "ipv4"
+				if next.Stack == v2.FirewallStackV6 {
+					family = "ipv6"
+				}
+				holeErr = add(family, iptablesArgs(next))
+			})
+			if holeErr != nil {
+				return holeErr
 			}
 		}
 		var keepErr error

@@ -16,6 +16,5 @@ func plusRulesStaleLinux() bool {
 	if !hostOwnsIptablesFilter() {
 		return false
 	}
-	out, err := runCmd(cmdTimeout, "iptables", "-S", "INPUT")
-	return err != nil || !iptablesInputJumpsToPlus(out)
+	return !iptablesPlusLive()
 }

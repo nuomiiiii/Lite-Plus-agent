@@ -111,8 +111,14 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(ownedLinux), `-S", "INPUT"`) || !strings.Contains(string(ownedLinux), "iptablesInputJumpsToPlus(") {
+	if !strings.Contains(string(ownedLinux), "iptablesPlusLive(") {
 		t.Fatal("iptables owned check must require the INPUT jump, not only a leftover chain")
+	}
+	if !strings.Contains(textLinux, "iptablesPlusLive(") || !strings.Contains(textLinux, `iptablesPlusInputLive("ip6tables")`) {
+		t.Fatal("iptables live check must cover ipv6 INPUT jump as well as ipv4")
+	}
+	if !strings.Contains(textLinux, "ruleAppliesToStack(") {
+		t.Fatal("plus allow rules must land on both ip and ip6 filter when the source is not family-specific")
 	}
 	bootLinux, err := os.ReadFile("boot_linux.go")
 	if err != nil {

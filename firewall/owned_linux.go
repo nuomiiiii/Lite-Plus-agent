@@ -14,11 +14,7 @@ func engOwned(eng backend) bool {
 		out, err := runCmd(cmdTimeout, "nft", "list", "table", "inet", nftTable)
 		return err == nil && strings.Contains(out, "chain")
 	case v2.FirewallBackendIptables:
-		if _, err := runCmd(cmdTimeout, "iptables", "-n", "-L", iptablesChain); err != nil {
-			return false
-		}
-		out, err := runCmd(cmdTimeout, "iptables", "-S", "INPUT")
-		return err == nil && iptablesInputJumpsToPlus(out)
+		return iptablesPlusLive()
 	case v2.FirewallBackendUFW:
 		out, err := runCmd(cmdTimeout, "ufw", "status", "numbered")
 		return err == nil && strings.Contains(out, "lite-plus:")
