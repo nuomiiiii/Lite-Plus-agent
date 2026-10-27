@@ -1,6 +1,11 @@
 package firewall
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	v2 "github.com/nuomiiiii/lite-agent/protocol/v2"
+)
 
 func TestParseIptablesSaveAdoptsSimpleINPUT(t *testing.T) {
 	raw := `*filter
@@ -38,6 +43,64 @@ func TestParseIptablesRejectsFail2ban(t *testing.T) {
 	rules := parseIptablesSave(raw, "v4", "INPUT")
 	if len(rules) != 1 || rules[0].Adoptable {
 		t.Fatalf("fail2ban: %+v", rules)
+	}
+}
+
+func TestParseIptablesFollows1PanelBasicAndAllPorts(t *testing.T) {
+	raw := `*filter
+:INPUT ACCEPT [0:0]
+:1PANEL_BASIC_BEFORE - [0:0]
+:1PANEL_BASIC - [0:0]
+:1PANEL_BASIC_AFTER - [0:0]
+-A INPUT -j 1PANEL_BASIC_BEFORE
+-A INPUT -j 1PANEL_BASIC
+-A INPUT -j 1PANEL_BASIC_AFTER
+-A 1PANEL_BASIC -s 39.0.0.0/8 -p tcp -m tcp --dport 29777 -j ACCEPT
+-A 1PANEL_BASIC -s 223.0.0.0/8 -p tcp -m tcp --dport 29777 -j ACCEPT
+-A 1PANEL_BASIC -s 39.0.0.0/8 -p tcp -m tcp --dport 12969 -j ACCEPT
+-A 1PANEL_BASIC -s 223.0.0.0/8 -p tcp -m tcp --dport 12969 -j ACCEPT
+-A 1PANEL_BASIC -p tcp -m tcp --dport 30108 -j ACCEPT
+-A 1PANEL_BASIC -s 10.240.3.4 -p tcp -j ACCEPT
+COMMIT
+`
+	rules := parseIptablesSave(raw, "v4", "INPUT")
+	if len(rules) != 9 {
+		t.Fatalf("rules = %d, want 9: %+v", len(rules), rules)
+	}
+	var adoptable []v2.FirewallHostRule
+	for _, rule := range rules {
+		if strings.Contains(rule.Raw, "-j 1PANEL_") && rule.Adoptable {
+			t.Fatalf("jump must stay view-only: %+v", rule)
+		}
+		if rule.Adoptable {
+			adoptable = append(adoptable, rule)
+		}
+	}
+	if len(adoptable) != 6 {
+		t.Fatalf("adoptable = %d, want 6: %+v", len(adoptable), adoptable)
+	}
+	if adoptable[0].Port != "29777" || adoptable[0].Source != "39.0.0.0/8" {
+		t.Fatalf("1panel-core: %+v", adoptable[0])
+	}
+	last := adoptable[len(adoptable)-1]
+	if last.Port != "*" || last.Protocol != "tcp" || last.Source != "10.240.3.4" || last.Action != "allow" {
+		t.Fatalf("all ports: %+v", last)
+	}
+}
+
+func TestParseIptablesAdoptsMissingDportAsAllPorts(t *testing.T) {
+	raw := `-A INPUT -s 10.240.3.4 -p tcp -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT
+`
+	rules := parseIptablesSave(raw, "v4", "INPUT")
+	if len(rules) != 2 {
+		t.Fatalf("%+v", rules)
+	}
+	if !rules[0].Adoptable || rules[0].Port != "*" || rules[0].Source != "10.240.3.4" {
+		t.Fatalf("star: %+v", rules[0])
+	}
+	if !rules[1].Adoptable || rules[1].Port != "22" {
+		t.Fatalf("ssh: %+v", rules[1])
 	}
 }
 
@@ -208,5 +271,56 @@ Action:                       Allow
 	}
 	if rules[1].Adoptable {
 		t.Fatalf("comma ports must stay view-only: %+v", rules[1])
+	}
+}
+
+func TestParseWindowsAnyPortIsAllPorts(t *testing.T) {
+	raw := `
+Rule Name:                    Allow all TCP
+Enabled:                      Yes
+Direction:                    In
+Protocol:                     TCP
+LocalPort:                    Any
+RemoteIP:                     10.240.3.4
+Action:                       Allow
+`
+	rules := parseWindowsRules(raw)
+	if len(rules) != 1 || !rules[0].Adoptable || rules[0].Port != "*" || rules[0].Source != "10.240.3.4" {
+		t.Fatalf("%+v", rules)
+	}
+}
+
+func TestParseNftAllPortsWithoutDport(t *testing.T) {
+	raw := `table ip filter {
+	chain INPUT {
+		jump 1PANEL_BASIC
+	}
+	chain 1PANEL_BASIC {
+		ip saddr 10.240.3.4 tcp accept
+		tcp dport 22 accept
+	}
+}
+`
+	rules := parseNftRuleset(raw)
+	if len(rules) != 3 {
+		t.Fatalf("%+v", rules)
+	}
+	if rules[0].Adoptable {
+		t.Fatalf("jump must stay view-only: %+v", rules[0])
+	}
+	if !rules[1].Adoptable || rules[1].Port != "*" || rules[1].Source != "10.240.3.4" || rules[1].Protocol != "tcp" {
+		t.Fatalf("all ports: %+v", rules[1])
+	}
+	if !rules[2].Adoptable || rules[2].Port != "22" {
+		t.Fatalf("ssh: %+v", rules[2])
+	}
+}
+
+func TestParseUFWAnywhereTCPIsAllPorts(t *testing.T) {
+	raw := `[ 1] Anywhere/tcp                ALLOW IN    10.240.3.4
+`
+	v4 := parseUFWStatus(raw, "v4")
+	if len(v4) != 1 || !v4[0].Adoptable || v4[0].Port != "*" || v4[0].Protocol != "tcp" || v4[0].Source != "10.240.3.4" {
+		t.Fatalf("%+v", v4)
 	}
 }

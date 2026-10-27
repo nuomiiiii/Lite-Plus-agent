@@ -18,15 +18,17 @@ const (
 )
 
 var (
-	iptablesRuleRe = regexp.MustCompile(`^-A\s+(\S+)\s+(.*)$`)
-	dportRe        = regexp.MustCompile(`--dport(?:s)?\s+(\d+)(?::(\d+))?`)
-	protoRe        = regexp.MustCompile(`(?:^|\s)-p\s+(tcp|udp)\b`)
-	sourceRe       = regexp.MustCompile(`(?:^|\s)-s\s+(\S+)`)
-	jumpRe         = regexp.MustCompile(`(?:^|\s)-j\s+(ACCEPT|DROP|REJECT)\b`)
-	ifaceRe        = regexp.MustCompile(`(?:^|\s)-i\s+(\S+)`)
-	complexRe      = regexp.MustCompile(`(?i)\b(DOCKER|FAIL2BAN|BR-|docker0|multiport|connlimit|limit|set\s+--match-set|owner|physdev|policy|helper|recent)\b`)
-	ufwLineRe      = regexp.MustCompile(`(?i)^\[\s*(\d+)\]\s+(.+?)\s+(ALLOW|DENY|REJECT|LIMIT)\s+(IN|OUT|FWD)\s+(\S.*)$`)
-	nftHandleRe    = regexp.MustCompile(`(?i)#\s*handle\s+(\d+)\s*$`)
+	iptablesRuleRe    = regexp.MustCompile(`^-A\s+(\S+)\s+(.*)$`)
+	dportRe           = regexp.MustCompile(`--dport(?:s)?\s+(\d+)(?::(\d+))?`)
+	protoRe           = regexp.MustCompile(`(?:^|\s)-p\s+(tcp|udp)\b`)
+	sourceRe          = regexp.MustCompile(`(?:^|\s)-s\s+(\S+)`)
+	jumpRe            = regexp.MustCompile(`(?:^|\s)-j\s+(ACCEPT|DROP|REJECT)\b`)
+	jumpAnyRe         = regexp.MustCompile(`(?:^|\s)-j\s+(\S+)`)
+	ifaceRe           = regexp.MustCompile(`(?:^|\s)-i\s+(\S+)`)
+	complexRe         = regexp.MustCompile(`(?i)\b(DOCKER|FAIL2BAN|BR-|docker0|multiport|connlimit|limit|set\s+--match-set|owner|physdev|policy|helper|recent)\b`)
+	iptablesCommentRe = regexp.MustCompile(`--comment\s+(?:"([^"]*)"|'([^']*)'|(\S+))`)
+	ufwLineRe         = regexp.MustCompile(`(?i)^\[\s*(\d+)\]\s+(.+?)\s+(ALLOW|DENY|REJECT|LIMIT)\s+(IN|OUT|FWD)\s+(\S.*)$`)
+	nftHandleRe       = regexp.MustCompile(`(?i)#\s*handle\s+(\d+)\s*$`)
 )
 
 func hostKey(parts ...string) string {
@@ -35,7 +37,7 @@ func hostKey(parts ...string) string {
 }
 
 func parseIptablesSave(raw, stack, chain string) []v2.FirewallHostRule {
-	var out []v2.FirewallHostRule
+	byChain := map[string][][2]string{}
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "*") || strings.HasPrefix(line, ":") || line == "COMMIT" {
@@ -45,24 +47,69 @@ func parseIptablesSave(raw, stack, chain string) []v2.FirewallHostRule {
 			continue
 		}
 		match := iptablesRuleRe.FindStringSubmatch(line)
-		if match == nil || !strings.EqualFold(match[1], chain) {
+		if match == nil {
 			continue
 		}
-		out = append(out, classifyIptablesBody(line, match[2], stack))
+		byChain[match[1]] = append(byChain[match[1]], [2]string{line, match[2]})
+	}
+	return collectIptablesChain(byChain, chain, stack, map[string]struct{}{})
+}
+
+func collectIptablesChain(byChain map[string][][2]string, chain, stack string, visited map[string]struct{}) []v2.FirewallHostRule {
+	if chain == "" {
+		return nil
+	}
+	if _, seen := visited[chain]; seen {
+		return nil
+	}
+	visited[chain] = struct{}{}
+	var out []v2.FirewallHostRule
+	for _, item := range byChain[chain] {
+		line, body := item[0], item[1]
+		rule := classifyIptablesBody(line, body, stack)
+		out = append(out, rule)
+		if rule.Adoptable {
+			continue
+		}
+		if target := iptablesJumpTarget(body); followIptablesChain(target) {
+			out = append(out, collectIptablesChain(byChain, target, stack, visited)...)
+		}
 	}
 	return out
 }
 
+func iptablesJumpTarget(body string) string {
+	match := jumpAnyRe.FindStringSubmatch(body)
+	if match == nil {
+		return ""
+	}
+	return match[1]
+}
+
+func followIptablesChain(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.ContainsAny(name, `/\:;|'"`+"\"") {
+		return false
+	}
+	switch strings.ToUpper(name) {
+	case "ACCEPT", "DROP", "REJECT", "RETURN", "LOG", "ULOG", "NFLOG", "MASQUERADE", "DNAT", "SNAT", "REDIRECT", "MARK", "CONNMARK", "CHECKSUM", "CT", "NOTRACK", "TPROXY", "TEE", "QUEUE", "NFQUEUE", plusIptablesChain, "INPUT", "FORWARD", "OUTPUT", "PREROUTING", "POSTROUTING":
+		return false
+	}
+	return !complexRe.MatchString(name)
+}
+
 func classifyIptablesBody(raw, body, stack string) v2.FirewallHostRule {
 	rule := v2.FirewallHostRule{Key: hostKey("iptables", stack, raw), Raw: raw, Stack: stack}
+	if comment := iptablesComment(body); comment != "" {
+		rule.Comment = comment
+	}
 	if ifaceRe.MatchString(body) || complexRe.MatchString(body) || strings.Contains(body, "!") {
 		rule.Reason = "complex"
 		return rule
 	}
 	jump := jumpRe.FindStringSubmatch(body)
 	proto := protoRe.FindStringSubmatch(body)
-	dport := dportRe.FindStringSubmatch(body)
-	if jump == nil || proto == nil || dport == nil {
+	if jump == nil || proto == nil {
 		rule.Reason = "unsupported match"
 		return rule
 	}
@@ -70,9 +117,12 @@ func classifyIptablesBody(raw, body, stack string) v2.FirewallHostRule {
 	if jump[1] != "ACCEPT" {
 		action = v2.FirewallActionDeny
 	}
-	port := dport[1]
-	if dport[2] != "" && dport[2] != dport[1] {
-		port = dport[1] + "-" + dport[2]
+	port := "*"
+	if dport := dportRe.FindStringSubmatch(body); dport != nil {
+		port = dport[1]
+		if dport[2] != "" && dport[2] != dport[1] {
+			port = dport[1] + "-" + dport[2]
+		}
 	}
 	source := ""
 	if src := sourceRe.FindStringSubmatch(body); len(src) > 1 {
@@ -84,6 +134,24 @@ func classifyIptablesBody(raw, body, stack string) v2.FirewallHostRule {
 	rule.Port = port
 	rule.Source = source
 	return rule
+}
+
+func iptablesComment(body string) string {
+	match := iptablesCommentRe.FindStringSubmatch(body)
+	if match == nil {
+		return ""
+	}
+	for _, group := range match[1:] {
+		if group != "" {
+			return group
+		}
+	}
+	return ""
+}
+
+func allPorts(raw string) bool {
+	port := strings.TrimSpace(raw)
+	return port == "*" || strings.EqualFold(port, "any")
 }
 
 func parseUFWStatus(raw, stack string) []v2.FirewallHostRule {
@@ -181,7 +249,7 @@ func ufwFromField(raw string) string {
 func splitPortProto(to string) (string, string) {
 	to = strings.TrimSpace(to)
 	to = strings.TrimSpace(strings.TrimSuffix(to, "(v6)"))
-	if to == "" || strings.EqualFold(to, "Anywhere") {
+	if to == "" {
 		return "", ""
 	}
 	port, proto, ok := strings.Cut(to, "/")
@@ -191,10 +259,16 @@ func splitPortProto(to string) (string, string) {
 			return "", ""
 		}
 		port = strings.ReplaceAll(strings.TrimSpace(port), ":", "-")
+		if allPorts(port) || strings.EqualFold(port, "Anywhere") {
+			return proto, "*"
+		}
 		if !validHostPort(port) {
 			return "", ""
 		}
 		return proto, port
+	}
+	if strings.EqualFold(to, "Anywhere") {
+		return "", ""
 	}
 	if _, err := strconv.Atoi(to); err == nil {
 		return "tcp", to
@@ -203,6 +277,9 @@ func splitPortProto(to string) (string, string) {
 }
 
 func validHostPort(port string) bool {
+	if allPorts(port) {
+		return true
+	}
 	from, to, ok := strings.Cut(port, "-")
 	if !ok {
 		_, err := strconv.Atoi(port)
@@ -234,10 +311,16 @@ func parseNftRuleset(raw string) []v2.FirewallHostRule {
 			}
 			continue
 		}
-		if !strings.Contains(trim, "dport") || strings.Contains(trim, plusCommentMark) {
+		if strings.Contains(trim, plusCommentMark) {
+			continue
+		}
+		if strings.HasPrefix(trim, "type ") || strings.HasPrefix(trim, "}") {
 			continue
 		}
 		if strings.Contains(trim, "dnat") || strings.Contains(trim, "snat") || strings.Contains(trim, "masquerade") || strings.Contains(trim, "redirect") {
+			continue
+		}
+		if !nftRuleLine(trim) {
 			continue
 		}
 		out = append(out, nftSimpleLine(trim, family, table, chain))
@@ -304,6 +387,16 @@ func firewalldPortRules(name, raw, kind string) []v2.FirewallHostRule {
 	return out
 }
 
+func nftRuleLine(trim string) bool {
+	lower := strings.ToLower(trim)
+	return strings.Contains(lower, "accept") ||
+		strings.Contains(lower, "drop") ||
+		strings.Contains(lower, "reject") ||
+		strings.Contains(lower, "jump") ||
+		strings.Contains(lower, "goto") ||
+		strings.Contains(lower, "dport")
+}
+
 func nftSimpleLine(line, family, table, chain string) v2.FirewallHostRule {
 	raw := strings.TrimSpace(line)
 	handle := ""
@@ -349,7 +442,9 @@ func nftSimpleLine(line, family, table, chain string) v2.FirewallHostRule {
 		}
 	}
 	port = strings.ReplaceAll(port, ":", "-")
-	if port == "" || strings.Contains(port, ",") || !validHostPort(port) {
+	if allPorts(port) || port == "" {
+		port = "*"
+	} else if strings.Contains(port, ",") || !validHostPort(port) {
 		rule.Reason = "unsupported match"
 		return rule
 	}
@@ -412,10 +507,25 @@ func parseWindowsRules(raw string) []v2.FirewallHostRule {
 		if strings.Contains(fields["localip"], ":") || strings.Contains(strings.ToLower(name), "ipv6") {
 			rule.Stack = v2.FirewallStackV6
 		}
-		if (proto != "tcp" && proto != "udp") || port == "" || strings.EqualFold(port, "any") || strings.Contains(port, ",") {
+		if proto != "tcp" && proto != "udp" {
 			rule.Reason = "unsupported match"
 			out = append(out, rule)
 			continue
+		}
+		if strings.Contains(port, ",") {
+			rule.Reason = "unsupported match"
+			out = append(out, rule)
+			continue
+		}
+		if allPorts(port) || port == "" {
+			port = "*"
+		} else {
+			port = strings.ReplaceAll(port, ":", "-")
+			if !validHostPort(port) {
+				rule.Reason = "unsupported match"
+				out = append(out, rule)
+				continue
+			}
 		}
 		action := v2.FirewallActionAllow
 		if strings.EqualFold(fields["action"], "block") {
@@ -424,7 +534,7 @@ func parseWindowsRules(raw string) []v2.FirewallHostRule {
 		rule.Adoptable = true
 		rule.Action = action
 		rule.Protocol = proto
-		rule.Port = strings.ReplaceAll(port, ":", "-")
+		rule.Port = port
 		if remote := fields["remoteip"]; remote != "" && !strings.EqualFold(remote, "any") {
 			rule.Source = remote
 		}

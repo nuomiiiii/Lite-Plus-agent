@@ -16,6 +16,9 @@ func sshPortOf(intent v2.FirewallIntent) string {
 
 func portSpecOK(raw string) bool {
 	raw = strings.TrimSpace(raw)
+	if allPorts(raw) {
+		return true
+	}
 	from, to, cut := strings.Cut(raw, "-")
 	if !cut {
 		return keepPort(raw) != ""

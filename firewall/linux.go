@@ -679,16 +679,20 @@ func nftRule(rule v2.FirewallRule) string {
 	} else if rule.Source != "" {
 		saddr = " ip saddr " + rule.Source
 	}
-	port := rule.Port
-	if strings.Contains(port, "-") {
-		from, to := matchPort(port)
-		port = from + "-" + to
+	spec := rule.Protocol
+	if !allPorts(rule.Port) {
+		port := rule.Port
+		if strings.Contains(port, "-") {
+			from, to := matchPort(port)
+			port = from + "-" + to
+		}
+		spec += " dport " + port
 	}
 	action := "accept"
 	if rule.Action == v2.FirewallActionDeny {
 		action = "drop"
 	}
-	return strings.TrimSpace(family + saddr + " " + rule.Protocol + " dport " + port + " " + action)
+	return strings.TrimSpace(family + saddr + " " + spec + " " + action)
 }
 
 func nftHole(hole v2.FirewallHole) string {
@@ -793,11 +797,13 @@ func iptablesArgs(rule v2.FirewallRule) []string {
 		args = append(args, "-s", rule.Source)
 	}
 	args = append(args, "-p", rule.Protocol)
-	from, to := matchPort(rule.Port)
-	if from == to {
-		args = append(args, "--dport", from)
-	} else {
-		args = append(args, "-m", "multiport", "--dports", from+":"+to)
+	if !allPorts(rule.Port) {
+		from, to := matchPort(rule.Port)
+		if from == to {
+			args = append(args, "--dport", from)
+		} else {
+			args = append(args, "-m", "multiport", "--dports", from+":"+to)
+		}
 	}
 	if rule.Action == v2.FirewallActionDeny {
 		args = append(args, "-j", "DROP")
@@ -902,7 +908,10 @@ func ufwArgs(rule v2.FirewallRule) []string {
 	} else {
 		args = append(args, "from", "::/0")
 	}
-	args = append(args, "to", "any", "port", strings.ReplaceAll(rule.Port, "-", ":"))
+	args = append(args, "to", "any")
+	if !allPorts(rule.Port) {
+		args = append(args, "port", strings.ReplaceAll(rule.Port, "-", ":"))
+	}
 	args = append(args, "comment", plusComment(rule.ID))
 	return args
 }

@@ -706,7 +706,7 @@ func xrayOutbounds(rows []OutboundSpec) []map[string]any {
 	out := []map[string]any{direct, block}
 	seen := map[string]bool{"direct": true, "block": true}
 	for _, row := range rows {
-		if !row.Enabled && row.ID != "" {
+		if !row.Enabled {
 			continue
 		}
 		tag := row.Name
@@ -887,7 +887,7 @@ func xrayRouteRules(routes []RouteSpec, outbounds []OutboundSpec, inboundTags ma
 	}
 	var rules []map[string]any
 	for _, row := range sorted {
-		if !row.Enabled && row.ID != "" {
+		if !row.Enabled {
 			continue
 		}
 		var s struct {

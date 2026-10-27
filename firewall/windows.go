@@ -274,9 +274,13 @@ func addWindowsRule(rule v2.FirewallRule) error {
 		"dir=in",
 		"action=" + action,
 		"protocol=" + rule.Protocol,
-		"localport=" + strings.ReplaceAll(rule.Port, "-", "-"),
 		"profile=any",
 		"enable=yes",
+	}
+	if allPorts(rule.Port) {
+		args = append(args, "localport=any")
+	} else {
+		args = append(args, "localport="+strings.ReplaceAll(rule.Port, "-", "-"))
 	}
 	if rule.Source != "" {
 		args = append(args, "remoteip="+rule.Source)
