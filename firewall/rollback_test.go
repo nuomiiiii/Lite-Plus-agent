@@ -120,6 +120,9 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(textLinux, "ruleAppliesToStack(") {
 		t.Fatal("plus allow rules must land on both ip and ip6 filter when the source is not family-specific")
 	}
+	if !strings.Contains(textLinux, "attachPlusToForeignInet(") || !strings.Contains(textLinux, "liveForeignInetInputHooks()") {
+		t.Fatal("nft inet filter hosts must join the existing input chain instead of a parallel liteplus table")
+	}
 	bootLinux, err := os.ReadFile("boot_linux.go")
 	if err != nil {
 		t.Fatal(err)

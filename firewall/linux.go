@@ -215,7 +215,10 @@ func (b linuxBackend) apply(intent v2.FirewallIntent, holes []v2.FirewallHole) e
 	case v2.FirewallBackendNFT:
 		return applyNFT(intent, holes)
 	case v2.FirewallBackendIptables:
-		return applyIptables(intent, holes)
+		if err := applyIptables(intent, holes); err != nil {
+			return err
+		}
+		return attachPlusToForeignInet(intent, holes)
 	default:
 		return errUnsupported
 	}
@@ -667,9 +670,12 @@ func writeSysctl(path, value string) error {
 }
 
 func applyNFT(intent v2.FirewallIntent, holes []v2.FirewallHole) error {
-	_, _ = runCmd(cmdTimeout, "nft", "delete", "table", "inet", nftTable)
+	deleteInetPlusTable()
 	if intentIdle(intent) {
 		return nil
+	}
+	if hooks := liveForeignInetInputHooks(); len(hooks) > 0 {
+		return attachPlusToForeignInet(intent, holes)
 	}
 	tmp, err := os.CreateTemp("", "liteplus-nft-*.nft")
 	if err != nil {
@@ -685,11 +691,8 @@ func applyNFT(intent v2.FirewallIntent, holes []v2.FirewallHole) error {
 	return err
 }
 
-func nftTableScript(intent v2.FirewallIntent, holes []v2.FirewallHole) string {
+func nftPlusChainBody(intent v2.FirewallIntent, holes []v2.FirewallHole) string {
 	var b strings.Builder
-	b.WriteString("table inet " + nftTable + " {\n")
-	b.WriteString("  chain input {\n")
-	b.WriteString("    type filter hook input priority -150; policy accept;\n")
 	b.WriteString("    iif lo accept\n")
 	b.WriteString("    ct state established,related accept\n")
 	if stackAllowed(v2.FirewallStackV4) {
@@ -728,7 +731,34 @@ func nftTableScript(intent v2.FirewallIntent, holes []v2.FirewallHole) string {
 			b.WriteString("    meta nfproto ipv6 drop\n")
 		}
 	}
+	return b.String()
+}
+
+func nftTableScript(intent v2.FirewallIntent, holes []v2.FirewallHole) string {
+	var b strings.Builder
+	b.WriteString("table inet " + nftTable + " {\n")
+	b.WriteString("  chain input {\n")
+	b.WriteString("    type filter hook input priority -150; policy accept;\n")
+	b.WriteString(nftPlusChainBody(intent, holes))
 	b.WriteString("  }\n}\n")
+	return b.String()
+}
+
+func nftAttachScript(hooks []nftInputHook, intent v2.FirewallIntent, holes []v2.FirewallHole) string {
+	body := nftPlusChainBody(intent, holes)
+	seen := map[string]struct{}{}
+	var b strings.Builder
+	for _, hook := range hooks {
+		key := hook.Family + " " + hook.Table
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		b.WriteString("table " + hook.Family + " " + hook.Table + " {\n")
+		b.WriteString("  chain " + plusIptablesChain + " {\n")
+		b.WriteString(body)
+		b.WriteString("  }\n}\n")
+	}
 	return b.String()
 }
 

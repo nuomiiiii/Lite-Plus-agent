@@ -11,8 +11,7 @@ import (
 func engOwned(eng backend) bool {
 	switch eng.name() {
 	case v2.FirewallBackendNFT:
-		out, err := runCmd(cmdTimeout, "nft", "list", "table", "inet", nftTable)
-		return err == nil && strings.Contains(out, "chain")
+		return nftPlusLive()
 	case v2.FirewallBackendIptables:
 		return iptablesPlusLive()
 	case v2.FirewallBackendUFW:

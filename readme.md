@@ -2,7 +2,7 @@
 
 Lite-Plus 的跨平台节点监控与节点管理 Agent。本仓库版本在基础监控之外，支持安全远程终端、文件管理、远程命令、Cloudflare Access、在线配置下发、配置结果回执，以及双核节点管理。
 
-当前稳定版本：`0.0.1.13`
+当前稳定版本：`0.0.1.14`
 
 使用 MCP 代理功能，Lite需升级至 2.3.3 或更高版本。
 
@@ -59,7 +59,7 @@ docker pull ghcr.io/nuomiiiii/lite-plus-agent:latest
 也可以拉取固定版本：
 
 ```bash
-docker pull ghcr.io/nuomiiiii/lite-plus-agent:0.0.1.13
+docker pull ghcr.io/nuomiiiii/lite-plus-agent:0.0.1.14
 ```
 
 容器的启动参数、宿主机目录挂载和节点 Token 请以 Lite 后台生成的部署命令为准。Docker 部署不会在容器内替换 Agent 二进制；升级时需拉取新镜像并重建容器。
@@ -223,6 +223,7 @@ Client ID 与 Client Secret 必须成对配置，可以选择命令行参数、�
 
 | 版本 | 主要内容 |
 | --- | --- |
+| `0.0.1.14` | 本机只有 nft inet filter 时，Plus 接到同一条 input 链，不再另开一张表被后面的默认拒绝丢掉。 |
 | `0.0.1.13` | IPv6 与 IPv4 同一套迁移：未写来源的放行会落到 ip6 filter；INPUT 跳转和旧并行表的检查覆盖 v6。 |
 | `0.0.1.12` | 升级后立刻清掉旧并行表并把已保存规则挂到本机 INPUT，不必再重启系统。链还在但 INPUT 没挂上时会自动补回去。 |
 | `0.0.1.11` | 升级后按本机已保存的 Plus 防火墙规则做迁移，不猜监听端口。规则原样落到本机入站表，不必再进后台点保存。 |

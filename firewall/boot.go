@@ -6,6 +6,7 @@ const (
 	bootUnitName      = "lite-plus-firewall.service"
 	bootAgentDropin   = "firewall.conf"
 	bootNftFile       = "firewall-boot.nft"
+	bootNftHooksFile  = "firewall-boot.hooks"
 	bootIptablesFile  = "firewall-boot.v4"
 	bootIP6tablesFile = "firewall-boot.v6"
 	bootScriptFile    = "firewall-boot.sh"

@@ -18,8 +18,30 @@ func persistBootLocked(eng backend, intent v2.FirewallIntent, holes []v2.Firewal
 	if err := os.MkdirAll(filepath.Dir(statePath()), 0o755); err != nil {
 		return err
 	}
+	hooks := liveForeignInetInputHooks()
+	wroteIpt := false
 	switch eng.name() {
+	case v2.FirewallBackendIptables:
+		if err := writeOwnedIptablesBoot(); err != nil {
+			return err
+		}
+		wroteIpt = true
 	case v2.FirewallBackendNFT:
+	default:
+		return clearBootPersist()
+	}
+	if len(hooks) > 0 {
+		body := strings.TrimSpace(nftAttachScript(hooks, intent, holes))
+		if err := os.WriteFile(bootPath(bootNftFile), []byte(body+"\n"), 0o600); err != nil {
+			return err
+		}
+		if err := os.WriteFile(bootPath(bootNftHooksFile), []byte(encodeNftHooks(hooks)), 0o600); err != nil {
+			return err
+		}
+		if st, err := os.Stat("/etc/nftables.d"); err == nil && st.IsDir() {
+			_ = os.WriteFile(nftablesDropin, []byte(body+"\n"), 0o644)
+		}
+	} else if eng.name() == v2.FirewallBackendNFT {
 		raw, err := eng.dump()
 		body := strings.TrimSpace(string(raw))
 		if err != nil || body == "" {
@@ -31,19 +53,18 @@ func persistBootLocked(eng backend, intent v2.FirewallIntent, holes []v2.Firewal
 		if err := os.WriteFile(bootPath(bootNftFile), []byte(body+"\n"), 0o600); err != nil {
 			return err
 		}
-		_ = os.Remove(bootPath(bootIptablesFile))
-		_ = os.Remove(bootPath(bootIP6tablesFile))
+		_ = os.Remove(bootPath(bootNftHooksFile))
 		if st, err := os.Stat("/etc/nftables.d"); err == nil && st.IsDir() {
 			_ = os.WriteFile(nftablesDropin, []byte(body+"\n"), 0o644)
 		}
-	case v2.FirewallBackendIptables:
-		if err := writeOwnedIptablesBoot(); err != nil {
-			return err
-		}
+	} else {
 		_ = os.Remove(bootPath(bootNftFile))
+		_ = os.Remove(bootPath(bootNftHooksFile))
 		_ = os.Remove(nftablesDropin)
-	default:
-		return clearBootPersist()
+	}
+	if !wroteIpt {
+		_ = os.Remove(bootPath(bootIptablesFile))
+		_ = os.Remove(bootPath(bootIP6tablesFile))
 	}
 	script := firewallBootScript()
 	if err := os.WriteFile(bootPath(bootScriptFile), []byte(script), 0o700); err != nil {
@@ -97,19 +118,28 @@ func firewallBootScript() string {
 	nft := bootPath(bootNftFile)
 	v4 := bootPath(bootIptablesFile)
 	v6 := bootPath(bootIP6tablesFile)
+	hooks := bootPath(bootNftHooksFile)
 	return `#!/bin/sh
 NFT_FILE="` + nft + `"
+HOOKS_FILE="` + hooks + `"
 V4_FILE="` + v4 + `"
 V6_FILE="` + v6 + `"
 CHAIN="` + iptablesChain + `"
 TABLE="` + nftTable + `"
 load_nft() {
+	nft delete table inet "$TABLE" >/dev/null 2>&1 || true
+	if [ -f "$HOOKS_FILE" ]; then
+		[ -f "$NFT_FILE" ] && nft -f "$NFT_FILE"
+		while read -r fam tab ch; do
+			[ -z "$fam" ] && continue
+			nft list chain "$fam" "$tab" "$ch" 2>/dev/null | grep -q "jump $CHAIN" || nft insert rule "$fam" "$tab" "$ch" jump "$CHAIN"
+		done < "$HOOKS_FILE"
+		return 0
+	fi
 	if [ -f "$V4_FILE" ] || [ -f "$V6_FILE" ]; then
-		nft delete table inet "$TABLE" >/dev/null 2>&1 || true
 		return 0
 	fi
 	[ -f "$NFT_FILE" ] || return 0
-	nft delete table inet "$TABLE" >/dev/null 2>&1 || true
 	nft -f "$NFT_FILE"
 }
 load_ipt() {
@@ -170,6 +200,7 @@ func installBootUnit() error {
 
 func clearBootPersist() error {
 	_ = os.Remove(bootPath(bootNftFile))
+	_ = os.Remove(bootPath(bootNftHooksFile))
 	_ = os.Remove(bootPath(bootIptablesFile))
 	_ = os.Remove(bootPath(bootIP6tablesFile))
 	_ = os.Remove(bootPath(bootScriptFile))

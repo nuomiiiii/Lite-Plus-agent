@@ -84,4 +84,7 @@ func TestFirewallBootScriptLoadsNftAndIptables(t *testing.T) {
 	if !strings.Contains(script, `if [ -f "$V4_FILE" ] || [ -f "$V6_FILE" ]; then`) {
 		t.Fatal("boot must drop leftover inet liteplus when plus already lives in iptables INPUT")
 	}
+	if !strings.Contains(script, "HOOKS_FILE=") || !strings.Contains(script, `jump $CHAIN`) {
+		t.Fatal("boot must insert plus into an existing inet input chain")
+	}
 }
