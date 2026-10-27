@@ -69,7 +69,7 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if strings.Index(detect, "hostOwnsIptablesFilter()") < 0 || strings.Index(detect, "hostOwnsIptablesFilter()") > strings.Index(detect, `lookPath("nft")`) {
 		t.Fatal("hosts with an existing iptables-nft INPUT must not use a separate inet liteplus table")
 	}
-	if !strings.Contains(textLinux, "clearOtherBackend(") {
+	if !strings.Contains(textLinux, "clearOtherBackend(") || !strings.Contains(textLinux, "deleteInetPlusTable(") {
 		t.Fatal("switching to iptables must drop leftover inet liteplus so a later host filter cannot drop plus accepts")
 	}
 	owner, err := os.ReadFile("iptables_owner.go")
@@ -107,6 +107,13 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(string(watch), "engOwned(") || !strings.Contains(string(watch), "restorePersistedLocked()") || !strings.Contains(string(watch), "plusRulesStale(") {
 		t.Fatal("watch must restore after a host flush and when plus still sits on a leftover inet table")
 	}
+	ownedLinux, err := os.ReadFile("owned_linux.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ownedLinux), `-S", "INPUT"`) || !strings.Contains(string(ownedLinux), "iptablesInputJumpsToPlus(") {
+		t.Fatal("iptables owned check must require the INPUT jump, not only a leftover chain")
+	}
 	bootLinux, err := os.ReadFile("boot_linux.go")
 	if err != nil {
 		t.Fatal(err)
@@ -119,8 +126,8 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(string(bootShared), "lite-plus-firewall.service") || !strings.Contains(bootText, "fail2ban.service") || !strings.Contains(bootText, "bt.service") {
 		t.Fatal("boot unit must load plus ports after common host firewalls, not only one panel")
 	}
-	if !strings.Contains(bootText, "ownedIptablesRestore(") || !strings.Contains(bootText, "nftTableScript(") {
-		t.Fatal("boot persist must keep every plus allow port, not only ssh")
+	if !strings.Contains(bootText, "ownedIptablesRestore(") || !strings.Contains(bootText, "nftTableScript(") || !strings.Contains(bootText, "applyBootScriptLocked(") {
+		t.Fatal("boot persist must apply the same live rules as reboot, not wait for a machine restart")
 	}
 	if !strings.Contains(textLinux, "NFT_HOST_V1") || !strings.Contains(textLinux, `nft", "list", "ruleset"`) {
 		t.Fatal("nft adopt dump must capture the full host ruleset")

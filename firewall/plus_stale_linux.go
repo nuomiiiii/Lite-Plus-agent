@@ -10,5 +10,12 @@ func leftoverInetPlusTable() bool {
 }
 
 func plusRulesStaleLinux() bool {
-	return hostOwnsIptablesFilter() && leftoverInetPlusTable()
+	if leftoverInetPlusTable() && hostOwnsIptablesFilter() {
+		return true
+	}
+	if !hostOwnsIptablesFilter() {
+		return false
+	}
+	out, err := runCmd(cmdTimeout, "iptables", "-S", "INPUT")
+	return err != nil || !iptablesInputJumpsToPlus(out)
 }

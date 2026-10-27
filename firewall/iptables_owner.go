@@ -36,7 +36,17 @@ func inputPolicyDrop(line string) bool {
 }
 
 func iptablesInputJumpIsPlus(line string) bool {
-	return strings.Contains(line, " -j "+plusIptablesChain) || strings.HasSuffix(line, " -j "+plusIptablesChain)
+	return strings.HasPrefix(line, "-A INPUT") && (strings.Contains(line, " -j "+plusIptablesChain) || strings.HasSuffix(line, " -j "+plusIptablesChain))
+}
+
+func iptablesInputJumpsToPlus(save string) bool {
+	for _, line := range strings.Split(save, "\n") {
+		trim := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if iptablesInputJumpIsPlus(trim) {
+			return true
+		}
+	}
+	return false
 }
 
 func nftInputHasForeignRules(raw string) bool {

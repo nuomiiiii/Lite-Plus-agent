@@ -151,13 +151,23 @@ func outerManagers(backend string) []string {
 
 func clearOtherBackend(kind string) {
 	if kind != v2.FirewallBackendNFT {
-		_, _ = runCmd(cmdTimeout, "nft", "delete", "table", "inet", nftTable)
+		deleteInetPlusTable()
 	}
 	if kind != v2.FirewallBackendIptables && kind != v2.FirewallBackendFirewalld {
 		for _, bin := range []string{"iptables", "ip6tables"} {
 			_, _ = runCmd(cmdTimeout, bin, "-D", "INPUT", "-j", iptablesChain)
 			_, _ = runCmd(cmdTimeout, bin, "-F", iptablesChain)
 			_, _ = runCmd(cmdTimeout, bin, "-X", iptablesChain)
+		}
+	}
+}
+
+func deleteInetPlusTable() {
+	for i := 0; i < 3; i++ {
+		_, _ = runCmd(cmdTimeout, "nft", "flush", "table", "inet", nftTable)
+		_, err := runCmd(cmdTimeout, "nft", "delete", "table", "inet", nftTable)
+		if err == nil || !leftoverInetPlusTable() {
+			return
 		}
 	}
 }
@@ -735,6 +745,7 @@ func nftHole(hole v2.FirewallHole) string {
 }
 
 func applyIptables(intent v2.FirewallIntent, holes []v2.FirewallHole) error {
+	defer deleteInetPlusTable()
 	if stackAllowed(v2.FirewallStackV4) {
 		if err := applyIptablesFamily("iptables", v2.FirewallStackV4, intent, holes); err != nil {
 			return err

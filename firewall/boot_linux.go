@@ -49,7 +49,19 @@ func persistBootLocked(eng backend, intent v2.FirewallIntent, holes []v2.Firewal
 	if err := os.WriteFile(bootPath(bootScriptFile), []byte(script), 0o700); err != nil {
 		return err
 	}
-	return installBootUnit()
+	if err := installBootUnit(); err != nil {
+		return err
+	}
+	return applyBootScriptLocked()
+}
+
+func applyBootScriptLocked() error {
+	path := bootPath(bootScriptFile)
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	_, err := runCmd(dumpTimeout, path)
+	return err
 }
 
 func writeOwnedIptablesBoot() error {

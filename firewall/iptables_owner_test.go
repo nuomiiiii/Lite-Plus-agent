@@ -71,3 +71,12 @@ func TestIptablesFilterOwnedByHostDetectsAnyHostInput(t *testing.T) {
 		t.Fatal("nft Plus INPUT jump must not look like another host firewall")
 	}
 }
+
+func TestIptablesInputJumpsToPlus(t *testing.T) {
+	if !iptablesInputJumpsToPlus("-P INPUT ACCEPT\n-A INPUT -j LITE_PLUS\n-A INPUT -j 1PANEL_BASIC\n") {
+		t.Fatal("INPUT jump to plus must count as live")
+	}
+	if iptablesInputJumpsToPlus("-P INPUT ACCEPT\n-A INPUT -j 1PANEL_BASIC\n-A LITE_PLUS -j DROP\n") {
+		t.Fatal("a leftover plus chain without INPUT jump is not live")
+	}
+}
