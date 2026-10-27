@@ -1,6 +1,7 @@
 package firewall
 
 import (
+	"strings"
 	"testing"
 
 	v2 "github.com/nuomiiiii/lite-agent/protocol/v2"
@@ -52,6 +53,20 @@ func TestKeepRulesUseIntentSSHPort(t *testing.T) {
 	eachKeepRule(v2.FirewallIntent{DefaultDeny4: true, DefaultDeny6: true, SshPort: "2222"}, func(rule v2.FirewallRule) {
 		if rule.Comment == "SSH" && rule.Port != "2222" {
 			t.Fatalf("deny keep must follow ssh port: %+v", rule)
+		}
+	})
+}
+
+func TestKeepRulesOmitSSH(t *testing.T) {
+	rules := keepRules(v2.FirewallIntent{OmitKeep: []string{"ssh"}, SshPort: "2222"})
+	for _, rule := range rules {
+		if strings.EqualFold(rule.Comment, "SSH") {
+			t.Fatalf("omitted ssh keep still present: %+v", rule)
+		}
+	}
+	eachKeepRule(v2.FirewallIntent{DefaultDeny4: true, DefaultDeny6: true, OmitKeep: []string{"ssh"}, SshPort: "2222"}, func(rule v2.FirewallRule) {
+		if strings.EqualFold(rule.Comment, "SSH") {
+			t.Fatalf("omitted ssh keep still applied: %+v", rule)
 		}
 	})
 }

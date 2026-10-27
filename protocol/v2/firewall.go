@@ -5,6 +5,7 @@ const (
 	FirewallActionDeny  = "deny"
 	FirewallProtoTCP    = "tcp"
 	FirewallProtoUDP    = "udp"
+	FirewallProtoBoth   = "both"
 	FirewallStackV4     = "v4"
 	FirewallStackV6     = "v6"
 
@@ -53,6 +54,7 @@ type FirewallIntent struct {
 	DefaultDeny4 bool           `json:"default_deny_v4"`
 	DefaultDeny6 bool           `json:"default_deny_v6"`
 	SshPort      string         `json:"ssh_port,omitempty"`
+	OmitKeep     []string       `json:"omit_keep,omitempty"`
 	Rules        []FirewallRule `json:"rules"`
 }
 

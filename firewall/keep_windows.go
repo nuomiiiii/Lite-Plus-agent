@@ -10,5 +10,5 @@ func keepRules(intent v2.FirewallIntent) []v2.FirewallRule {
 	out = append(out, keepTCP("5985", "WinRM")...)
 	out = append(out, keepTCP("5986", "WinRM HTTPS")...)
 	out = append(out, keepTCP(sshPortOf(intent), "SSH")...)
-	return out
+	return filterOmittedKeep(intent, out)
 }

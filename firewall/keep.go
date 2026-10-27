@@ -75,6 +75,31 @@ func keepPort(raw string) string {
 	return strconv.Itoa(port)
 }
 
+func filterOmittedKeep(intent v2.FirewallIntent, rules []v2.FirewallRule) []v2.FirewallRule {
+	if len(intent.OmitKeep) == 0 || len(rules) == 0 {
+		return rules
+	}
+	skip := make(map[string]struct{}, len(intent.OmitKeep))
+	for _, item := range intent.OmitKeep {
+		key := strings.ToLower(strings.TrimSpace(item))
+		if key == "" {
+			continue
+		}
+		skip[key] = struct{}{}
+	}
+	if len(skip) == 0 {
+		return rules
+	}
+	out := make([]v2.FirewallRule, 0, len(rules))
+	for _, rule := range rules {
+		if _, ok := skip[strings.ToLower(strings.TrimSpace(rule.Comment))]; ok {
+			continue
+		}
+		out = append(out, rule)
+	}
+	return out
+}
+
 func keepTCP(port, comment string) []v2.FirewallRule {
 	port = keepPort(port)
 	if port == "" {
