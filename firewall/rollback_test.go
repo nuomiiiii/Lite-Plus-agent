@@ -107,12 +107,22 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(string(watch), "engOwned(") || !strings.Contains(string(watch), "restorePersistedLocked()") || !strings.Contains(string(watch), "plusRulesStale(") {
 		t.Fatal("watch must restore after a host flush and when plus still sits on a leftover inet table")
 	}
+	stale, err := os.ReadFile("plus_stale.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stale), "plusRulesStaleDecision(") || !strings.Contains(string(stale), "FirewallBackendUFW") {
+		t.Fatal("ufw hosts must not treat the native INPUT chain as a missing plus jump")
+	}
 	ownedLinux, err := os.ReadFile("owned_linux.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(ownedLinux), "iptablesPlusLive(") {
 		t.Fatal("iptables owned check must require the INPUT jump, not only a leftover chain")
+	}
+	if !strings.Contains(string(ownedLinux), `"--get-chains", "ipv6", "filter"`) {
+		t.Fatal("firewalld owned check must cover the ipv6 plus chain, not only ipv4")
 	}
 	if !strings.Contains(textLinux, "iptablesPlusLive(") || !strings.Contains(textLinux, `iptablesPlusInputLive("ip6tables")`) {
 		t.Fatal("iptables live check must cover ipv6 INPUT jump as well as ipv4")

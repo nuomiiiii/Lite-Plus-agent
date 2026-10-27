@@ -73,23 +73,21 @@ func nftPlusLive() bool {
 }
 
 func plusRulesStaleLinux() bool {
+	kind := detectLinuxBackend()
+	leftover := leftoverInetPlusTable()
+	if kind == v2.FirewallBackendUFW {
+		return plusRulesStaleDecision(kind, leftover, false, false, false, true)
+	}
 	hooks := liveForeignInetInputHooks()
+	inetJumpLive := true
 	if len(hooks) > 0 {
-		if leftoverInetPlusTable() {
-			return true
-		}
 		for _, hook := range hooks {
 			listed, err := runCmd(cmdTimeout, "nft", "list", "chain", hook.Family, hook.Table, hook.Chain)
 			if err != nil || !nftChainJumpsToPlus(listed) {
-				return true
+				inetJumpLive = false
+				break
 			}
 		}
 	}
-	if leftoverInetPlusTable() && hostOwnsIptablesFilter() {
-		return true
-	}
-	if hostOwnsIptablesFilter() && !iptablesPlusLive() {
-		return true
-	}
-	return false
+	return plusRulesStaleDecision(kind, leftover, hostOwnsIptablesFilter(), iptablesPlusLive(), len(hooks) > 0, inetJumpLive)
 }
