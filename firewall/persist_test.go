@@ -91,13 +91,30 @@ func TestHolesFromIntentAndIdle(t *testing.T) {
 			{Origin: v2.FirewallOriginWeb, Enabled: true, Protocol: "tcp", Port: "22", Stack: v2.FirewallStackV4},
 		},
 	}
-	holes := holesFromIntent(intent)
-	if len(holes) != 1 || holes[0].Port != "443" {
-		t.Fatalf("%+v", holes)
+	if holes := holesFromIntent(intent); len(holes) != 0 {
+		t.Fatalf("inbound allow must not also become a listen hole: %+v", holes)
 	}
-	merged := mergeHoles(nil, holes, []v2.FirewallHole{{Protocol: "tcp", Port: "443", Stack: v2.FirewallStackV4}, {Protocol: "tcp", Port: "80", Stack: v2.FirewallStackV4}})
+	merged := mergeHoles(nil, nil, []v2.FirewallHole{{Protocol: "tcp", Port: "443", Stack: v2.FirewallStackV4}, {Protocol: "tcp", Port: "80", Stack: v2.FirewallStackV4}})
 	if len(merged) != 2 {
 		t.Fatalf("merge holes: %+v", merged)
+	}
+}
+
+func TestLiveHolesDropsCoveredInbound(t *testing.T) {
+	intent := v2.FirewallIntent{
+		DefaultDeny4: true,
+		Rules: []v2.FirewallRule{
+			{Enabled: true, Action: "allow", Protocol: "tcp", Port: "32688", Stack: v2.FirewallStackV4, Origin: v2.FirewallOriginInbound},
+			{Enabled: true, Action: "allow", Protocol: "tcp", Port: "32800", Stack: v2.FirewallStackV4, Origin: v2.FirewallOriginWeb, Source: "10.0.0.1"},
+		},
+	}
+	got := liveHoles(intent, []v2.FirewallHole{
+		{Protocol: "tcp", Port: "32688", Stack: v2.FirewallStackV4},
+		{Protocol: "tcp", Port: "8443", Stack: v2.FirewallStackV4},
+		{Protocol: "tcp", Port: "32800", Stack: v2.FirewallStackV4},
+	})
+	if len(got) != 2 || got[0].Port != "8443" || got[1].Port != "32800" {
+		t.Fatalf("covered inbound must drop, sourced allow must keep hole: %+v", got)
 	}
 }
 

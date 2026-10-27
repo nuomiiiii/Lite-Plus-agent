@@ -30,6 +30,39 @@ func TestNftTableScriptKeepsAllAllowPorts(t *testing.T) {
 	}
 }
 
+func TestNftTableScriptDropsHoleCoveredByAllow(t *testing.T) {
+	v4, v6 := stackPresent()
+	if !v4 && !v6 {
+		t.Skip("no IP stack")
+	}
+	script := nftTableScript(v2.FirewallIntent{
+		DefaultDeny4: true,
+		DefaultDeny6: true,
+		Rules: []v2.FirewallRule{
+			{ID: "in", Enabled: true, Action: "allow", Protocol: "tcp", Port: "32688", Stack: v2.FirewallStackV4, Origin: v2.FirewallOriginInbound},
+		},
+	}, []v2.FirewallHole{
+		{Protocol: "tcp", Port: "32688", Stack: v2.FirewallStackV4},
+		{Protocol: "tcp", Port: "8443", Stack: v2.FirewallStackV4},
+	})
+	want32688 := 0
+	want8443 := 0
+	if v4 {
+		want32688++
+		want8443++
+	}
+	if v6 {
+		want32688++
+		want8443++
+	}
+	if got := strings.Count(script, "dport 32688"); got != want32688 {
+		t.Fatalf("inbound allow + hole must write 32688 once per stack, got %d want %d in\n%s", got, want32688, script)
+	}
+	if got := strings.Count(script, "dport 8443"); got != want8443 {
+		t.Fatalf("uncovered hole must remain, got %d want %d in\n%s", got, want8443, script)
+	}
+}
+
 func TestOwnedIptablesRestoreOnlyPlusChain(t *testing.T) {
 	raw := `*filter
 :INPUT ACCEPT [0:0]

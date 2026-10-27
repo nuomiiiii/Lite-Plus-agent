@@ -46,6 +46,7 @@ func (windowsBackend) apply(intent v2.FirewallIntent, holes []v2.FirewallHole) e
 	if err := applyWindowsPing(intent.BlockPing4, intent.BlockPing6); err != nil {
 		return err
 	}
+	holes = liveHoles(intent, holes)
 	if intentIdle(intent) {
 		if savedPolicy != "" {
 			_, err := runCmd(cmdTimeout, "netsh", "advfirewall", "set", "allprofiles", "firewallpolicy", savedPolicy)

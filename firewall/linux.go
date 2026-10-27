@@ -203,6 +203,7 @@ func (b linuxBackend) apply(intent v2.FirewallIntent, holes []v2.FirewallHole) e
 	if !privileged() {
 		return errUnsupported
 	}
+	holes = liveHoles(intent, holes)
 	if err := applyPing(intent.BlockPing4, intent.BlockPing6); err != nil {
 		return err
 	}
@@ -713,10 +714,7 @@ func nftPlusChainBody(intent v2.FirewallIntent, holes []v2.FirewallHole) string 
 		})
 	}
 	if intent.DefaultDeny4 || intent.DefaultDeny6 {
-		for _, hole := range holes {
-			if !holeSafe(hole) {
-				continue
-			}
+		for _, hole := range liveHoles(intent, holes) {
 			eachStackedRule(v2.FirewallRule{Action: v2.FirewallActionAllow, Protocol: hole.Protocol, Port: hole.Port, Stack: hole.Stack, Comment: hole.Comment}, func(next v2.FirewallRule) {
 				b.WriteString("    " + nftRule(next) + "\n")
 			})

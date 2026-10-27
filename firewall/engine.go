@@ -57,6 +57,7 @@ func Apply(intent v2.FirewallIntent, holes []v2.FirewallHole) v2.FirewallResultP
 	if len(holes) == 0 {
 		holes = holesFromIntent(intent)
 	}
+	holes = liveHoles(intent, holes)
 	prev, _ := eng.dump()
 	ping4, ping6 := captureAux()
 	needSSH := keepPort(intent.SshPort) != ""
@@ -262,7 +263,7 @@ func restorePersistedLocked() error {
 	if port := sshPortOf(state.Intent); port != "" {
 		state.Intent.SshPort = port
 	}
-	holes := mergeHoles(state.ListenHoles, holesFromIntent(state.Intent))
+	holes := liveHoles(state.Intent, mergeHoles(state.ListenHoles, holesFromIntent(state.Intent)))
 	if err := eng.apply(state.Intent, holes); err != nil {
 		return err
 	}
@@ -274,28 +275,45 @@ func holesFromIntent(intent v2.FirewallIntent) []v2.FirewallHole {
 	if !intent.DefaultDeny4 && !intent.DefaultDeny6 {
 		return nil
 	}
-	holes := make([]v2.FirewallHole, 0)
-	for _, rule := range intent.Rules {
-		if rule.Origin != v2.FirewallOriginInbound || !rule.Enabled {
+	// Inbound-linked allows are already in intent.Rules. Copying them into
+	// listen holes made Plus write the same ACCEPT twice when 同时放行 is on.
+	return nil
+}
+
+func allowCoversHole(intent v2.FirewallIntent, hole v2.FirewallHole) bool {
+	for _, rule := range enabledRules(intent) {
+		if strings.EqualFold(strings.TrimSpace(rule.Action), v2.FirewallActionDeny) {
 			continue
 		}
-		if rule.Stack == v2.FirewallStackV4 && !intent.DefaultDeny4 {
+		if strings.TrimSpace(rule.Source) != "" {
 			continue
 		}
-		if rule.Stack == v2.FirewallStackV6 && !intent.DefaultDeny6 {
+		if !strings.EqualFold(rule.Protocol, hole.Protocol) {
 			continue
 		}
-		if !ruleSafe(rule) {
+		if !allPorts(rule.Port) && rule.Port != hole.Port {
 			continue
 		}
-		holes = append(holes, v2.FirewallHole{
-			Protocol: rule.Protocol,
-			Port:     rule.Port,
-			Stack:    rule.Stack,
-			Comment:  rule.Comment,
-		})
+		return true
 	}
-	return holes
+	return false
+}
+
+func liveHoles(intent v2.FirewallIntent, holes []v2.FirewallHole) []v2.FirewallHole {
+	if len(holes) == 0 {
+		return nil
+	}
+	out := make([]v2.FirewallHole, 0, len(holes))
+	for _, hole := range holes {
+		if !holeSafe(hole) || allowCoversHole(intent, hole) {
+			continue
+		}
+		out = append(out, hole)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func mergeHoles(groups ...[]v2.FirewallHole) []v2.FirewallHole {
