@@ -74,7 +74,7 @@ func ssXrayClients(in InboundSpec, granted []UserSpec) (method string, settings 
 			"method":   method,
 			"password": ssServerKey(in, method),
 			"clients":  users,
-			"network":  "tcp,udp",
+			"network":  ssListenNetwork(in),
 		}, true
 	}
 	users := make([]map[string]string, 0, len(granted))
@@ -88,7 +88,7 @@ func ssXrayClients(in InboundSpec, granted []UserSpec) (method string, settings 
 	if len(users) == 0 {
 		return method, nil, false
 	}
-	return method, map[string]any{"clients": users, "network": "tcp,udp"}, true
+	return method, map[string]any{"clients": users, "network": ssListenNetwork(in)}, true
 }
 
 func ssSingBoxInbound(in InboundSpec, granted []UserSpec) (map[string]any, bool) {
@@ -111,5 +111,23 @@ func ssSingBoxInbound(in InboundSpec, granted []UserSpec) (map[string]any, bool)
 	if ss2022Method(method) {
 		item["password"] = ssServerKey(in, method)
 	}
+	if network := ssListenNetwork(in); network == "tcp" || network == "udp" {
+		item["network"] = network
+	}
 	return item, true
+}
+
+func ssListenNetwork(in InboundSpec) string {
+	raw := strings.ToLower(strings.TrimSpace(settingString(in.SettingsJSON, "ss_network")))
+	raw = strings.ReplaceAll(raw, " ", "")
+	raw = strings.ReplaceAll(raw, "/", ",")
+	raw = strings.ReplaceAll(raw, "+", ",")
+	switch raw {
+	case "udp":
+		return "udp"
+	case "tcp":
+		return "tcp"
+	default:
+		return "tcp,udp"
+	}
 }

@@ -406,6 +406,7 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 				item[key] = value
 			}
 		}
+		applySingBoxUDPFragment(item, in)
 		listenHosts := []string{listenAddr}
 		if public {
 			listenHosts = publicCoreListenHosts(hosts, "tcp4")
@@ -905,6 +906,28 @@ func firstString(v any) string {
 		}
 	}
 	return ""
+}
+
+func applySingBoxUDPFragment(item map[string]any, in InboundSpec) {
+	if !inboundListensUDP(in) {
+		return
+	}
+	v := settingBool(in.SettingsJSON, "udp_fragment")
+	if v == nil {
+		return
+	}
+	item["udp_fragment"] = *v
+}
+
+func inboundListensUDP(in InboundSpec) bool {
+	switch strings.ToLower(strings.TrimSpace(in.Protocol)) {
+	case "hysteria2", "tuic":
+		return true
+	case "shadowsocks":
+		return ssListenNetwork(in) != "tcp"
+	default:
+		return false
+	}
 }
 
 func udpInbound(proto string) bool {

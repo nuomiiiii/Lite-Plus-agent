@@ -875,6 +875,34 @@ func TestXraySSConfigUsesPasswordAndMethod(t *testing.T) {
 	}
 }
 
+func TestXraySSNetworkHonorsSetting(t *testing.T) {
+	c := newXrayCore()
+	c.users = []UserSpec{{ID: "u1", Password: "secret"}}
+	c.inbounds = []InboundSpec{{
+		ID: "ss1", Listen: "127.0.0.1", Port: 8388, Protocol: "shadowsocks",
+		SettingsJSON: `{"ss_method":"aes-128-gcm","ss_network":"tcp","transport":"tcp","security":"none"}`,
+	}}
+	raw, _, _, err := c.buildConfig(c.users, c.inbounds, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"network":"tcp"`) {
+		t.Fatalf("tcp-only ss: %s", text)
+	}
+	if strings.Contains(text, `"network":"tcp,udp"`) {
+		t.Fatalf("tcp-only ss still has both: %s", text)
+	}
+	c.inbounds[0].SettingsJSON = `{"ss_method":"aes-128-gcm","ss_network":"udp"}`
+	raw, _, _, err = c.buildConfig(c.users, c.inbounds, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"network":"udp"`) {
+		t.Fatalf("udp-only ss: %s", raw)
+	}
+}
+
 func TestSingBoxSSConfigNoProxyProtocol(t *testing.T) {
 	c := newSingBoxCore()
 	c.users = []UserSpec{{
@@ -903,6 +931,74 @@ func TestSingBoxSSConfigNoProxyProtocol(t *testing.T) {
 	}
 	if strings.Contains(text, "proxy_protocol") {
 		t.Fatalf("ss must not use proxy protocol: %s", text)
+	}
+	if strings.Contains(text, "udp_fragment") {
+		t.Fatalf("ss udp inbound must omit udp_fragment by default: %s", text)
+	}
+}
+
+func TestSingBoxSSNetworkHonorsSetting(t *testing.T) {
+	c := newSingBoxCore()
+	c.users = []UserSpec{{ID: "u1", Password: "secret"}}
+	c.inbounds = []InboundSpec{{
+		ID: "ss1", Listen: "127.0.0.1", Port: 8388, Protocol: "shadowsocks",
+		SettingsJSON: `{"ss_method":"aes-128-gcm","ss_network":"tcp"}`,
+	}}
+	raw, _, _, err := c.buildConfig(c.users, c.inbounds, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"network": "tcp"`) && !strings.Contains(text, `"network":"tcp"`) {
+		t.Fatalf("tcp-only ss: %s", text)
+	}
+	if strings.Contains(text, "udp_fragment") {
+		t.Fatalf("tcp-only ss must not set udp_fragment: %s", text)
+	}
+	c.inbounds[0].SettingsJSON = `{"ss_method":"aes-128-gcm"}`
+	raw, _, _, err = c.buildConfig(c.users, c.inbounds, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"network": "tcp"`) || strings.Contains(string(raw), `"network":"tcp"`) {
+		t.Fatalf("default ss must listen both, got %s", raw)
+	}
+	if strings.Contains(string(raw), "udp_fragment") {
+		t.Fatalf("default ss must omit udp_fragment: %s", raw)
+	}
+}
+
+func TestSingBoxSSUDPFragmentCanTurnOff(t *testing.T) {
+	c := newSingBoxCore()
+	c.users = []UserSpec{{ID: "u1", Password: "secret"}}
+	c.inbounds = []InboundSpec{{
+		ID: "ss1", Listen: "127.0.0.1", Port: 8388, Protocol: "shadowsocks",
+		SettingsJSON: `{"ss_method":"aes-128-gcm","udp_fragment":false}`,
+	}}
+	raw, _, _, err := c.buildConfig(c.users, c.inbounds, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"udp_fragment":false`) && !strings.Contains(text, `"udp_fragment": false`) {
+		t.Fatalf("explicit off: %s", text)
+	}
+}
+
+func TestSingBoxSSUDPFragmentCanTurnOn(t *testing.T) {
+	c := newSingBoxCore()
+	c.users = []UserSpec{{ID: "u1", Password: "secret"}}
+	c.inbounds = []InboundSpec{{
+		ID: "ss1", Listen: "127.0.0.1", Port: 8388, Protocol: "shadowsocks",
+		SettingsJSON: `{"ss_method":"aes-128-gcm","udp_fragment":true}`,
+	}}
+	raw, _, _, err := c.buildConfig(c.users, c.inbounds, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"udp_fragment":true`) && !strings.Contains(text, `"udp_fragment": true`) {
+		t.Fatalf("explicit on: %s", text)
 	}
 }
 

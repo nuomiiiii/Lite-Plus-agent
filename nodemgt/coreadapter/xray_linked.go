@@ -680,6 +680,36 @@ func settingString(raw, key string) string {
 	return got
 }
 
+func settingBool(raw, key string) *bool {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		return nil
+	}
+	got, ok := obj[key]
+	if !ok || got == nil {
+		return nil
+	}
+	switch t := got.(type) {
+	case bool:
+		v := t
+		return &v
+	case string:
+		s := strings.ToLower(strings.TrimSpace(t))
+		if s == "true" {
+			v := true
+			return &v
+		}
+		if s == "false" {
+			v := false
+			return &v
+		}
+	}
+	return nil
+}
+
 func splitCSV(raw string) []string {
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
