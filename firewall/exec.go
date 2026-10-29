@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -31,7 +32,7 @@ func runCmdStdin(timeout time.Duration, stdin string, name string, args ...strin
 func runCmdStdinEnv(timeout time.Duration, stdin string, extraEnv []string, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, resolveCmd(name), args...)
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C", "LANGUAGE=C")
 	cmd.Env = append(cmd.Env, extraEnv...)
 	if stdin != "" {
@@ -59,6 +60,29 @@ func runCmdStdinEnv(timeout time.Duration, stdin string, extraEnv []string, name
 }
 
 func lookPath(name string) bool {
+	resolved := resolveCmd(name)
+	if resolved != name || filepath.IsAbs(resolved) {
+		info, err := os.Stat(resolved)
+		return err == nil && !info.IsDir()
+	}
 	_, err := exec.LookPath(name)
 	return err == nil
+}
+
+func resolveCmd(name string) string {
+	if name == "" || filepath.IsAbs(name) {
+		return name
+	}
+	if path, err := exec.LookPath(name); err == nil {
+		return path
+	}
+	for _, dir := range []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin"} {
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		return candidate
+	}
+	return name
 }
