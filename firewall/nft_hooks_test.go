@@ -52,3 +52,49 @@ func TestNftChainJumpsToPlus(t *testing.T) {
 		t.Fatal("plain accept is not a plus jump")
 	}
 }
+
+func TestAttachableInetHooksSkipsUfwAndFirewalld(t *testing.T) {
+	hooks := attachableInetHooks([]nftInputHook{
+		{Family: "inet", Table: "filter", Chain: "input"},
+		{Family: "inet", Table: "ufw-user-input", Chain: "input"},
+		{Family: "inet", Table: "firewalld", Chain: "filter_INPUT"},
+	})
+	if len(hooks) != 1 || hooks[0].Table != "filter" {
+		t.Fatalf("only distro inet filter should be attached: %+v", hooks)
+	}
+}
+
+func TestNftInetHeadLiveRequiresBaseAllows(t *testing.T) {
+	jumpOnly := `chain input {
+	jump LITE_PLUS # handle 7
+	tcp dport 22 accept # handle 8
+}
+`
+	if nftInetHeadLive(jumpOnly, false) != true {
+		t.Fatal("jump is enough when plus has no base allows")
+	}
+	if nftInetHeadLive(jumpOnly, true) {
+		t.Fatal("jumped accept is not enough when plus allows must sit in the host input chain")
+	}
+	withAllow := `chain input {
+	meta nfproto ipv4 tcp dport 45633 accept comment "lite-plus:abc" # handle 9
+	jump LITE_PLUS # handle 7
+}
+`
+	if !nftInetHeadLive(withAllow, true) {
+		t.Fatal("jump plus marked allows must count as live")
+	}
+}
+
+func TestNftPlusCommentHandles(t *testing.T) {
+	listed := `chain input {
+	jump LITE_PLUS # handle 7
+	meta nfproto ipv4 tcp dport 45633 accept comment "lite-plus:abc" # handle 9
+	tcp dport 22 accept # handle 8
+}
+`
+	got := nftPlusCommentHandles(listed)
+	if len(got) != 1 || got[0] != "9" {
+		t.Fatalf("handles %v", got)
+	}
+}

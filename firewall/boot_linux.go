@@ -129,11 +129,22 @@ TABLE="` + nftTable + `"
 load_nft() {
 	nft delete table inet "$TABLE" >/dev/null 2>&1 || true
 	if [ -f "$HOOKS_FILE" ]; then
-		[ -f "$NFT_FILE" ] && nft -f "$NFT_FILE"
 		while read -r fam tab ch; do
 			[ -z "$fam" ] && continue
-			nft list chain "$fam" "$tab" "$ch" 2>/dev/null | grep -q "jump $CHAIN" || nft insert rule "$fam" "$tab" "$ch" jump "$CHAIN"
+			nft add chain "$fam" "$tab" "$CHAIN" >/dev/null 2>&1 || true
+			nft flush chain "$fam" "$tab" "$CHAIN" >/dev/null 2>&1 || true
 		done < "$HOOKS_FILE"
+		while read -r fam tab ch; do
+			[ -z "$fam" ] && continue
+			nft -a list chain "$fam" "$tab" "$ch" 2>/dev/null | awk -v chain="$CHAIN" '
+				/lite-plus:/ || $0 ~ "jump "chain { if (match($0, /# handle [0-9]+/)) print substr($0, RSTART+9) }
+			' | sort -nr | while read -r handle; do
+				[ -z "$handle" ] && continue
+				nft delete rule "$fam" "$tab" "$ch" handle "$handle" >/dev/null 2>&1 || true
+			done
+			nft insert rule "$fam" "$tab" "$ch" jump "$CHAIN" >/dev/null 2>&1 || true
+		done < "$HOOKS_FILE"
+		[ -f "$NFT_FILE" ] && nft -f "$NFT_FILE"
 		return 0
 	fi
 	if [ -f "$V4_FILE" ] || [ -f "$V6_FILE" ]; then

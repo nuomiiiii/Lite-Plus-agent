@@ -613,6 +613,51 @@ func TestSingBoxOutboundMapsShadowsocksMethod(t *testing.T) {
 	}
 }
 
+func TestSingBoxSSOutboundHonorsNetwork(t *testing.T) {
+	udp := singBoxOutbounds([]OutboundSpec{{
+		Protocol: "shadowsocks", Enabled: true,
+		SettingsJSON: `{"address":"ss.example.com","port":8388,"password":"x","ss_method":"aes-128-gcm","ss_network":"udp"}`,
+	}})
+	if network := udp[len(udp)-1]["network"]; network != "udp" {
+		t.Fatalf("udp network=%v", network)
+	}
+	tcp := singBoxOutbounds([]OutboundSpec{{
+		Protocol: "shadowsocks", Enabled: true,
+		SettingsJSON: `{"address":"ss.example.com","port":8388,"password":"x","ss_method":"aes-128-gcm","ss_network":"tcp"}`,
+	}})
+	if network := tcp[len(tcp)-1]["network"]; network != "tcp" {
+		t.Fatalf("tcp network=%v", network)
+	}
+	both := singBoxOutbounds([]OutboundSpec{{
+		Protocol: "shadowsocks", Enabled: true,
+		SettingsJSON: `{"address":"ss.example.com","port":8388,"password":"x","ss_method":"aes-128-gcm","ss_network":"tcp,udp","transport":"tcp"}`,
+	}})
+	if _, ok := both[len(both)-1]["network"]; ok {
+		t.Fatalf("tcp,udp must omit network, got %v", both[len(both)-1])
+	}
+	legacy := singBoxOutbounds([]OutboundSpec{{
+		Protocol: "shadowsocks", Enabled: true,
+		SettingsJSON: `{"address":"ss.example.com","port":8388,"password":"x","ss_method":"aes-128-gcm","transport":"tcp"}`,
+	}})
+	if _, ok := legacy[len(legacy)-1]["network"]; ok {
+		t.Fatalf("legacy tcp dummy must stay both, got %v", legacy[len(legacy)-1])
+	}
+}
+
+func TestXraySSOutboundDoesNotCopyListenNetworkIntoStream(t *testing.T) {
+	item := xrayOutboundItem(OutboundSpec{
+		Protocol:     "shadowsocks",
+		SettingsJSON: `{"address":"ss.example.com","port":8388,"password":"x","ss_method":"aes-128-gcm","transport":"tcp,udp"}`,
+	}, "ss")
+	if item == nil {
+		t.Fatal("missing ss outbound")
+	}
+	stream, _ := item["streamSettings"].(map[string]any)
+	if netw, _ := stream["network"].(string); netw == "tcp,udp" || netw == "udp" {
+		t.Fatalf("ss listen network leaked into stream: %v", stream)
+	}
+}
+
 func TestSingBoxOutboundDefaultsShadowsocksMethod(t *testing.T) {
 	outbounds := singBoxOutbounds([]OutboundSpec{{
 		Protocol: "shadowsocks", Enabled: true, SettingsJSON: `{"password":"x"}`,

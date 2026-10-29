@@ -133,6 +133,82 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(textLinux, "attachPlusToForeignInet(") || !strings.Contains(textLinux, "liveForeignInetInputHooks()") {
 		t.Fatal("nft inet filter hosts must join the existing input chain instead of a parallel liteplus table")
 	}
+	if !strings.Contains(textLinux, "detachPlusFromForeignInet(") {
+		t.Fatal("idle nft apply must drop plus accepts from a leftover inet filter")
+	}
+	attachFn := textLinux[strings.Index(textLinux, "func nftAttachScript("):]
+	if end := strings.Index(attachFn, "\nfunc "); end > 0 {
+		attachFn = attachFn[:end]
+	}
+	if !strings.Contains(attachFn, "flush chain ") {
+		t.Fatal("nft attach must flush LITE_PLUS before rewriting; nft -f appends and an old default-deny drop would shadow new allows")
+	}
+	tableFn := textLinux[strings.Index(textLinux, "func nftTableScript("):]
+	if end := strings.Index(tableFn, "\nfunc "); end > 0 {
+		tableFn = tableFn[:end]
+	}
+	flushOwn := strings.Index(tableFn, `flush chain inet " + nftTable + " input`)
+	if flushOwn < 0 {
+		flushOwn = strings.Index(tableFn, "flush chain inet")
+	}
+	bodyOwn := strings.Index(tableFn, "nftPlusChainBody(")
+	if flushOwn < 0 || bodyOwn < 0 || flushOwn > bodyOwn {
+		t.Fatal("owned nft table must flush input before rewriting; nft -f appends")
+	}
+	iptablesFn := textLinux[strings.Index(textLinux, "func applyIptablesFamily("):]
+	if end := strings.Index(iptablesFn, "\nfunc "); end > 0 {
+		iptablesFn = iptablesFn[:end]
+	}
+	flushIP := strings.Index(iptablesFn, `"-F", chain`)
+	addIP := strings.Index(iptablesFn, `"-A", chain`)
+	if flushIP < 0 || addIP < 0 || flushIP > addIP {
+		t.Fatal("iptables apply must flush LITE_PLUS before adding rules")
+	}
+	argsFn := textLinux[strings.Index(textLinux, "func iptablesArgs("):]
+	if end := strings.Index(argsFn, "\nfunc "); end > 0 {
+		argsFn = argsFn[:end]
+	}
+	if !strings.Contains(argsFn, `"--comment"`) || !strings.Contains(argsFn, "plusRuleMark(") {
+		t.Fatal("iptables apply must mark plus rules with lite-plus comments")
+	}
+	attachLinux, err := os.ReadFile("nft_attach_linux.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(attachLinux), "ensureNftPlusHead(") || !strings.Contains(string(attachLinux), "nftBaseAllowTokens(") {
+		t.Fatal("inet attach must insert plus accepts into the foreign input chain")
+	}
+	if !strings.Contains(textLinux, `"insert rule "`) {
+		t.Fatal("attach script must insert plus allows into the host input chain so policy drop cannot ignore jumped accepts")
+	}
+	ufwFn := textLinux[strings.Index(textLinux, "func applyUFW("):]
+	if end := strings.Index(ufwFn, "\nfunc "); end > 0 {
+		ufwFn = ufwFn[:end]
+	}
+	clearUfw := strings.Index(ufwFn, "clearUfwPlusRules()")
+	addUfw := strings.Index(ufwFn, `runCmd(cmdTimeout, "ufw"`)
+	if clearUfw < 0 || addUfw < 0 || clearUfw > addUfw {
+		t.Fatal("ufw apply must delete plus-owned rules before adding replacements")
+	}
+	applyFn := textLinux[strings.Index(textLinux, "func (b linuxBackend) apply("):]
+	if end := strings.Index(applyFn, "\nfunc "); end > 0 {
+		applyFn = applyFn[:end]
+	}
+	if !strings.Contains(applyFn, "applyUFW(") || strings.Index(applyFn, "applyUFW(") > strings.LastIndex(applyFn, "attachPlusToForeignInet(") {
+		t.Fatal("ufw apply must also attach plus allows into a leftover inet filter")
+	}
+	if !strings.Contains(applyFn, "applyFirewalld(") || strings.Index(applyFn, "applyFirewalld(") > strings.LastIndex(applyFn, "attachPlusToForeignInet(") {
+		t.Fatal("firewalld apply must also attach plus allows into a leftover inet filter")
+	}
+	fwFn := textLinux[strings.Index(textLinux, "func applyFirewalld("):]
+	if end := strings.Index(fwFn, "\nfunc "); end > 0 {
+		fwFn = fwFn[:end]
+	}
+	removeFD := strings.Index(fwFn, `removeFirewalldChain("ipv4")`)
+	addFD := strings.Index(fwFn, `"--add-chain"`)
+	if removeFD < 0 || addFD < 0 || removeFD > addFD {
+		t.Fatal("firewalld apply must remove the plus chain before adding rules")
+	}
 	bootLinux, err := os.ReadFile("boot_linux.go")
 	if err != nil {
 		t.Fatal(err)
@@ -147,6 +223,14 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	}
 	if !strings.Contains(bootText, "ownedIptablesRestore(") || !strings.Contains(bootText, "nftTableScript(") || !strings.Contains(bootText, "applyBootScriptLocked(") {
 		t.Fatal("boot persist must apply the same live rules as reboot, not wait for a machine restart")
+	}
+	if !strings.Contains(bootText, "lite-plus:") || !strings.Contains(bootText, `nft delete rule "$fam" "$tab" "$ch" handle`) {
+		t.Fatal("boot must drop previous plus accepts from inet input before reloading")
+	}
+	jumpAt := strings.Index(bootText, `nft insert rule "$fam" "$tab" "$ch" jump "$CHAIN"`)
+	loadAt := strings.Index(bootText, `[ -f "$NFT_FILE" ] && nft -f "$NFT_FILE"`)
+	if jumpAt < 0 || loadAt < 0 || jumpAt > loadAt {
+		t.Fatal("boot must insert the plus jump before loading marked allows")
 	}
 	if !strings.Contains(textLinux, "NFT_HOST_V1") || !strings.Contains(textLinux, `nft", "list", "ruleset"`) {
 		t.Fatal("nft adopt dump must capture the full host ruleset")
@@ -197,5 +281,14 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	}
 	if strings.Contains(winDump, `"export"`) {
 		t.Fatal("windows apply dump must not export the whole firewall on every apply")
+	}
+	winApply := winText[strings.Index(winText, "func (windowsBackend) apply("):]
+	if end := strings.Index(winApply, "\nfunc "); end > 0 {
+		winApply = winApply[:end]
+	}
+	clearWin := strings.Index(winApply, "clearWindowsGroup()")
+	addWin := strings.Index(winApply, "addWindowsRule(")
+	if clearWin < 0 || addWin < 0 || clearWin > addWin {
+		t.Fatal("windows apply must clear the Lite Plus group before adding replacements")
 	}
 }

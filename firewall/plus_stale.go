@@ -12,7 +12,13 @@ func plusRulesStale() bool {
 // Plus rules every watch tick.
 func plusRulesStaleDecision(kind string, leftoverPlus, hostOwns, iptablesLive, hasInetHooks, inetJumpLive bool) bool {
 	if kind == v2.FirewallBackendUFW {
-		return leftoverPlus
+		if leftoverPlus {
+			return true
+		}
+		if hasInetHooks && !inetJumpLive {
+			return true
+		}
+		return false
 	}
 	if hasInetHooks {
 		if leftoverPlus {

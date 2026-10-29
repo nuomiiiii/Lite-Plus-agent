@@ -44,6 +44,14 @@ func processFirewallEvent(conn *ws.SafeConn, method string, params interface{}) 
 		}
 		go reportFirewallResult(conn, withRequest(firewall.Adopt(p.Keys), p.RequestID, v2.FirewallKindAdopt))
 		return true
+	case v2.MethodAgentFirewallInstall:
+		var p v2.FirewallInstallParams
+		if err := v2.BindParams(params, &p); err != nil {
+			log.Printf("bad firewall install params: %v", err)
+			return true
+		}
+		go reportFirewallResult(conn, withRequest(firewall.InstallNftables(), p.RequestID, v2.FirewallKindInstall))
+		return true
 	default:
 		return false
 	}

@@ -117,7 +117,59 @@ func TestFirewallBootScriptLoadsNftAndIptables(t *testing.T) {
 	if !strings.Contains(script, `if [ -f "$V4_FILE" ] || [ -f "$V6_FILE" ]; then`) {
 		t.Fatal("boot must drop leftover inet liteplus when plus already lives in iptables INPUT")
 	}
-	if !strings.Contains(script, "HOOKS_FILE=") || !strings.Contains(script, `jump $CHAIN`) {
+	if !strings.Contains(script, "HOOKS_FILE=") || !strings.Contains(script, `jump "$CHAIN"`) {
 		t.Fatal("boot must insert plus into an existing inet input chain")
+	}
+	jumpAt := strings.Index(script, `nft insert rule "$fam" "$tab" "$ch" jump "$CHAIN"`)
+	loadAt := strings.Index(script, `[ -f "$NFT_FILE" ] && nft -f "$NFT_FILE"`)
+	if jumpAt < 0 || loadAt < 0 || jumpAt > loadAt {
+		t.Fatal("boot must insert the plus jump before loading marked allows so policy drop cannot sit in front")
+	}
+	if !strings.Contains(script, `nft flush chain "$fam" "$tab" "$CHAIN"`) {
+		t.Fatal("boot must flush LITE_PLUS before reloading so old default-deny drops cannot shadow new allows")
+	}
+	if !strings.Contains(script, "lite-plus:") {
+		t.Fatal("boot must remove previous plus accepts from inet input")
+	}
+}
+
+func TestNftAttachScriptFlushesBeforeRules(t *testing.T) {
+	script := nftAttachScript([]nftInputHook{{Family: "inet", Table: "filter", Chain: "input"}}, v2.FirewallIntent{
+		DefaultDeny4: true,
+		SshPort:      "22",
+		Rules: []v2.FirewallRule{
+			{ID: "web", Enabled: true, Action: "allow", Protocol: "tcp", Port: "443", Stack: v2.FirewallStackV4},
+		},
+	}, nil)
+	flushAt := strings.Index(script, "flush chain inet filter "+plusIptablesChain)
+	allowAt := strings.LastIndex(script, "dport 443")
+	dropAt := strings.LastIndex(script, "meta nfproto ipv4 drop")
+	if flushAt < 0 || allowAt < 0 || dropAt < 0 {
+		t.Fatalf("missing flush/allow/drop in\n%s", script)
+	}
+	if flushAt > allowAt || flushAt > dropAt {
+		t.Fatal("flush must come before plus rules so a second apply does not leave the old drop in front of new allows")
+	}
+	if !strings.Contains(script, "insert rule inet filter input") || !strings.Contains(script, `comment "lite-plus:web"`) {
+		t.Fatal("attach script must insert plus allows into inet input so a later policy drop cannot ignore jumped accepts")
+	}
+}
+
+func TestNftTableScriptFlushesBeforeRules(t *testing.T) {
+	script := nftTableScript(v2.FirewallIntent{
+		DefaultDeny4: true,
+		SshPort:      "22",
+		Rules: []v2.FirewallRule{
+			{ID: "web", Enabled: true, Action: "allow", Protocol: "tcp", Port: "443", Stack: v2.FirewallStackV4},
+		},
+	}, nil)
+	flushAt := strings.Index(script, "flush chain inet "+nftTable+" input")
+	allowAt := strings.LastIndex(script, "dport 443")
+	dropAt := strings.LastIndex(script, "meta nfproto ipv4 drop")
+	if flushAt < 0 || allowAt < 0 || dropAt < 0 {
+		t.Fatalf("missing flush/allow/drop in\n%s", script)
+	}
+	if flushAt > allowAt || flushAt > dropAt {
+		t.Fatal("owned nft table must flush input before rewriting so nft -f cannot append an old drop in front of new allows")
 	}
 }

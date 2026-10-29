@@ -307,14 +307,11 @@ func parseNftRuleset(raw string) []v2.FirewallHostRule {
 		if strings.HasPrefix(trim, "chain ") {
 			fields := strings.Fields(trim)
 			if len(fields) >= 2 {
-				chain = fields[1]
+				chain = strings.TrimSuffix(fields[1], "{")
 			}
 			continue
 		}
-		if strings.Contains(trim, plusCommentMark) {
-			continue
-		}
-		if strings.HasPrefix(trim, "type ") || strings.HasPrefix(trim, "}") {
+		if nftSkipHostLine(trim, chain) {
 			continue
 		}
 		if strings.Contains(trim, "dnat") || strings.Contains(trim, "snat") || strings.Contains(trim, "masquerade") || strings.Contains(trim, "redirect") {
@@ -385,6 +382,30 @@ func firewalldPortRules(name, raw, kind string) []v2.FirewallHostRule {
 		}
 	}
 	return out
+}
+
+func nftSkipHostLine(trim, chain string) bool {
+	if strings.Contains(trim, plusCommentMark) {
+		return true
+	}
+	if strings.HasPrefix(trim, "}") {
+		return true
+	}
+	if strings.EqualFold(chain, plusIptablesChain) {
+		return true
+	}
+	lower := strings.ToLower(trim)
+	if strings.Contains(lower, "jump "+strings.ToLower(plusIptablesChain)) || strings.Contains(lower, "goto "+strings.ToLower(plusIptablesChain)) {
+		return true
+	}
+	if strings.HasPrefix(lower, "type ") || strings.HasPrefix(lower, "policy ") || strings.HasPrefix(lower, "hook ") {
+		return true
+	}
+	// Chain declarations such as `priority -1; policy accept` are not host rules.
+	if strings.Contains(lower, "hook") && strings.Contains(lower, "priority") {
+		return true
+	}
+	return false
 }
 
 func nftRuleLine(trim string) bool {

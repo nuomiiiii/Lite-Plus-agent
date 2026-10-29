@@ -24,6 +24,19 @@ func TestPlusRulesStaleDecision(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "ufw with inet filter missing plus jump is stale",
+			kind: v2.FirewallBackendUFW,
+			hasInetHooks: true,
+			want: true,
+		},
+		{
+			name: "ufw with inet filter plus jump is live",
+			kind: v2.FirewallBackendUFW,
+			hasInetHooks: true,
+			inetJumpLive: true,
+			want: false,
+		},
+		{
 			name: "ufw still moves off a leftover plus table",
 			kind: v2.FirewallBackendUFW,
 			leftoverPlus: true,

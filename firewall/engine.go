@@ -33,6 +33,12 @@ func Snapshot() v2.FirewallResultParams {
 	return withStacks(currentBackend().snapshot())
 }
 
+func InstallNftables() v2.FirewallResultParams {
+	opMu.Lock()
+	defer opMu.Unlock()
+	return withStacks(installNftables())
+}
+
 func Apply(intent v2.FirewallIntent, holes []v2.FirewallHole) v2.FirewallResultParams {
 	opMu.Lock()
 	defer opMu.Unlock()

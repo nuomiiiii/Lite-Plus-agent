@@ -549,7 +549,7 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 		}
 		log.Printf("nodemgt.control received before runtime start")
 		return true
-	case v2.MethodAgentFirewallSnapshot, v2.MethodAgentFirewallApply, v2.MethodAgentFirewallAdopt:
+	case v2.MethodAgentFirewallSnapshot, v2.MethodAgentFirewallApply, v2.MethodAgentFirewallAdopt, v2.MethodAgentFirewallInstall:
 		return processFirewallEvent(conn, method, params)
 	case v2.MethodAgentMessage, v2.MethodAgentEvent:
 		log.Printf("received v2 %s: %+v", method, params)

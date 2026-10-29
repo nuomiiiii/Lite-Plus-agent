@@ -13,7 +13,19 @@ func liveForeignInetInputHooks() []nftInputHook {
 	if err != nil {
 		return nil
 	}
-	return foreignInetInputHooks(out)
+	return attachableInetHooks(foreignInetInputHooks(out))
+}
+
+func detachPlusFromForeignInet() {
+	for _, hook := range liveForeignInetInputHooks() {
+		listed, _ := runCmd(cmdTimeout, "nft", "-a", "list", "chain", hook.Family, hook.Table, hook.Chain)
+		for _, handle := range nftJumpHandles(listed) {
+			_, _ = runCmd(cmdTimeout, "nft", "delete", "rule", hook.Family, hook.Table, hook.Chain, "handle", handle)
+		}
+		for _, handle := range nftPlusCommentHandles(listed) {
+			_, _ = runCmd(cmdTimeout, "nft", "delete", "rule", hook.Family, hook.Table, hook.Chain, "handle", handle)
+		}
+	}
 }
 
 func attachPlusToForeignInet(intent v2.FirewallIntent, holes []v2.FirewallHole) error {
@@ -23,6 +35,7 @@ func attachPlusToForeignInet(intent v2.FirewallIntent, holes []v2.FirewallHole) 
 	}
 	deleteInetPlusTable()
 	if intentIdle(intent) {
+		detachPlusFromForeignInet()
 		return nil
 	}
 	tmp, err := os.CreateTemp("", "liteplus-nft-attach-*.nft")
@@ -39,20 +52,60 @@ func attachPlusToForeignInet(intent v2.FirewallIntent, holes []v2.FirewallHole) 
 		return err
 	}
 	for _, hook := range hooks {
-		if err := ensureNftJumpHead(hook); err != nil {
+		if err := ensureNftPlusHead(hook, intent, holes); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func ensureNftJumpHead(hook nftInputHook) error {
+func ensureNftPlusHead(hook nftInputHook, intent v2.FirewallIntent, holes []v2.FirewallHole) error {
 	listed, _ := runCmd(cmdTimeout, "nft", "-a", "list", "chain", hook.Family, hook.Table, hook.Chain)
 	for _, handle := range nftJumpHandles(listed) {
 		_, _ = runCmd(cmdTimeout, "nft", "delete", "rule", hook.Family, hook.Table, hook.Chain, "handle", handle)
 	}
-	_, err := runCmd(cmdTimeout, "nft", "insert", "rule", hook.Family, hook.Table, hook.Chain, "jump", plusIptablesChain)
-	return err
+	for _, handle := range nftPlusCommentHandles(listed) {
+		_, _ = runCmd(cmdTimeout, "nft", "delete", "rule", hook.Family, hook.Table, hook.Chain, "handle", handle)
+	}
+	if _, err := runCmd(cmdTimeout, "nft", "insert", "rule", hook.Family, hook.Table, hook.Chain, "jump", plusIptablesChain); err != nil {
+		return err
+	}
+	allows := nftBaseAllowTokens(intent, holes)
+	for i := len(allows) - 1; i >= 0; i-- {
+		args := append([]string{"insert", "rule", hook.Family, hook.Table, hook.Chain}, allows[i]...)
+		if _, err := runCmd(cmdTimeout, "nft", args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func nftBaseAllowTokens(intent v2.FirewallIntent, holes []v2.FirewallHole) [][]string {
+	var out [][]string
+	add := func(rule v2.FirewallRule) {
+		if rule.Action != v2.FirewallActionAllow {
+			return
+		}
+		eachStackedRule(rule, func(next v2.FirewallRule) {
+			out = append(out, nftRuleTokens(next))
+		})
+	}
+	for _, rule := range enabledRules(intent) {
+		add(rule)
+	}
+	if intent.DefaultDeny4 || intent.DefaultDeny6 {
+		for _, hole := range liveHoles(intent, holes) {
+			add(v2.FirewallRule{
+				Action:   v2.FirewallActionAllow,
+				Protocol: hole.Protocol,
+				Port:     hole.Port,
+				Stack:    hole.Stack,
+				Comment:  hole.Comment,
+			})
+		}
+		eachKeepRule(intent, add)
+	}
+	return out
 }
 
 func nftPlusLive() bool {
@@ -63,31 +116,41 @@ func nftPlusLive() bool {
 	if leftoverInetPlusTable() {
 		return false
 	}
+	wantAllows := nftPersistWantsBaseAllows()
 	for _, hook := range hooks {
 		listed, err := runCmd(cmdTimeout, "nft", "list", "chain", hook.Family, hook.Table, hook.Chain)
-		if err != nil || !nftChainJumpsToPlus(listed) {
+		if err != nil || !nftInetHeadLive(listed, wantAllows) {
 			return false
 		}
 	}
 	return true
 }
 
+func nftPersistWantsBaseAllows() bool {
+	state := loadPersist()
+	if state == nil {
+		return false
+	}
+	return len(nftBaseAllowTokens(state.Intent, state.ListenHoles)) > 0
+}
+
 func plusRulesStaleLinux() bool {
 	kind := detectLinuxBackend()
 	leftover := leftoverInetPlusTable()
-	if kind == v2.FirewallBackendUFW {
-		return plusRulesStaleDecision(kind, leftover, false, false, false, true)
-	}
 	hooks := liveForeignInetInputHooks()
 	inetJumpLive := true
+	wantAllows := nftPersistWantsBaseAllows()
 	if len(hooks) > 0 {
 		for _, hook := range hooks {
 			listed, err := runCmd(cmdTimeout, "nft", "list", "chain", hook.Family, hook.Table, hook.Chain)
-			if err != nil || !nftChainJumpsToPlus(listed) {
+			if err != nil || !nftInetHeadLive(listed, wantAllows) {
 				inetJumpLive = false
 				break
 			}
 		}
+	}
+	if kind == v2.FirewallBackendUFW {
+		return plusRulesStaleDecision(kind, leftover, false, false, len(hooks) > 0, inetJumpLive)
 	}
 	return plusRulesStaleDecision(kind, leftover, hostOwnsIptablesFilter(), iptablesPlusLive(), len(hooks) > 0, inetJumpLive)
 }

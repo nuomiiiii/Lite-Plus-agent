@@ -290,6 +290,40 @@ Action:                       Allow
 	}
 }
 
+func TestParseNftSkipsPlusChainAndPriorityMeta(t *testing.T) {
+	raw := `table inet filter {
+	chain input {
+		type filter hook input priority -1; policy accept;
+		jump LITE_PLUS
+		jump 1PANEL_BASIC
+	}
+	chain LITE_PLUS {
+		iif lo accept
+		meta nfproto ipv4 tcp dport 443 accept
+		ip protocol icmp icmp type echo-request drop
+	}
+	chain 1PANEL_BASIC {
+		tcp dport 22 accept
+	}
+}
+`
+	rules := parseNftRuleset(raw)
+	if len(rules) != 2 {
+		t.Fatalf("rules = %d, want 2: %+v", len(rules), rules)
+	}
+	if rules[0].Adoptable || !strings.Contains(rules[0].Raw, "1PANEL_BASIC") {
+		t.Fatalf("1panel jump: %+v", rules[0])
+	}
+	if !rules[1].Adoptable || rules[1].Port != "22" {
+		t.Fatalf("ssh: %+v", rules[1])
+	}
+	for _, rule := range rules {
+		if strings.Contains(rule.Raw, "priority") || strings.Contains(rule.Raw, "LITE_PLUS") || strings.Contains(rule.Raw, "443") {
+			t.Fatalf("plus/meta leaked: %+v", rule)
+		}
+	}
+}
+
 func TestParseNftAllPortsWithoutDport(t *testing.T) {
 	raw := `table ip filter {
 	chain INPUT {

@@ -833,7 +833,17 @@ func xrayOutboundItem(row OutboundSpec, tag string) map[string]any {
 	return item
 }
 
+func xrayStreamNetwork(transport string) string {
+	switch strings.ToLower(strings.TrimSpace(transport)) {
+	case "tcp", "raw", "ws", "grpc", "httpupgrade", "xhttp", "kcp", "quic", "http":
+		return strings.ToLower(strings.TrimSpace(transport))
+	default:
+		return ""
+	}
+}
+
 func outboundStream(transport, security, sni, fingerprint, wsPath, wsHost, grpcService, via, realityPublicKey, realityShortID, spiderX, pinnedCertSHA256 string) map[string]any {
+	transport = xrayStreamNetwork(transport)
 	if transport == "" && security == "" && via == "" {
 		return nil
 	}

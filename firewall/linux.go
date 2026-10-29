@@ -103,6 +103,7 @@ func (b linuxBackend) snapshot() v2.FirewallResultParams {
 		DefaultDenyBlocked: defaultDenyBlocked(b.kind, outer),
 		KeepRules:          keepRules(v2.FirewallIntent{}),
 		SshPort:            detectedSSHPort(),
+		CanInstallNftables: canInstallNftables(),
 	}
 	if result.DefaultDenyBlocked {
 		result.DefaultDenyBlockReason = "default deny conflicts with ufw or firewalld"
@@ -145,6 +146,9 @@ func outerManagers(backend string) []string {
 	}
 	if dockerPresent() {
 		out = append(out, "docker")
+	}
+	if (backend == v2.FirewallBackendIptables || backend == v2.FirewallBackendUFW || backend == v2.FirewallBackendFirewalld) && len(liveForeignInetInputHooks()) > 0 {
+		out = append(out, "nftables")
 	}
 	return out
 }
@@ -210,9 +214,15 @@ func (b linuxBackend) apply(intent v2.FirewallIntent, holes []v2.FirewallHole) e
 	clearOtherBackend(b.kind)
 	switch b.kind {
 	case v2.FirewallBackendUFW:
-		return applyUFW(intent, holes)
+		if err := applyUFW(intent, holes); err != nil {
+			return err
+		}
+		return attachPlusToForeignInet(intent, holes)
 	case v2.FirewallBackendFirewalld:
-		return applyFirewalld(intent, holes)
+		if err := applyFirewalld(intent, holes); err != nil {
+			return err
+		}
+		return attachPlusToForeignInet(intent, holes)
 	case v2.FirewallBackendNFT:
 		return applyNFT(intent, holes)
 	case v2.FirewallBackendIptables:
@@ -673,6 +683,7 @@ func writeSysctl(path, value string) error {
 func applyNFT(intent v2.FirewallIntent, holes []v2.FirewallHole) error {
 	deleteInetPlusTable()
 	if intentIdle(intent) {
+		detachPlusFromForeignInet()
 		return nil
 	}
 	if hooks := liveForeignInetInputHooks(); len(hooks) > 0 {
@@ -734,9 +745,15 @@ func nftPlusChainBody(intent v2.FirewallIntent, holes []v2.FirewallHole) string 
 
 func nftTableScript(intent v2.FirewallIntent, holes []v2.FirewallHole) string {
 	var b strings.Builder
+	// nft -f appends to an existing chain. Flush first so a previous default-deny
+	// drop cannot sit in front of newly allowed ports.
 	b.WriteString("table inet " + nftTable + " {\n")
 	b.WriteString("  chain input {\n")
 	b.WriteString("    type filter hook input priority -150; policy accept;\n")
+	b.WriteString("  }\n}\n")
+	b.WriteString("flush chain inet " + nftTable + " input\n")
+	b.WriteString("table inet " + nftTable + " {\n")
+	b.WriteString("  chain input {\n")
 	b.WriteString(nftPlusChainBody(intent, holes))
 	b.WriteString("  }\n}\n")
 	return b.String()
@@ -752,39 +769,89 @@ func nftAttachScript(hooks []nftInputHook, intent v2.FirewallIntent, holes []v2.
 			continue
 		}
 		seen[key] = struct{}{}
+		// nft -f appends to an existing chain. A previous default-deny drop
+		// would sit in front of newly allowed ports unless we replace the chain.
+		b.WriteString("table " + hook.Family + " " + hook.Table + " {\n")
+		b.WriteString("  chain " + plusIptablesChain + " {\n")
+		b.WriteString("  }\n}\n")
+		b.WriteString("flush chain " + hook.Family + " " + hook.Table + " " + plusIptablesChain + "\n")
 		b.WriteString("table " + hook.Family + " " + hook.Table + " {\n")
 		b.WriteString("  chain " + plusIptablesChain + " {\n")
 		b.WriteString(body)
 		b.WriteString("  }\n}\n")
 	}
+	seenHook := map[string]struct{}{}
+	for _, hook := range hooks {
+		key := hook.Family + " " + hook.Table + " " + hook.Chain
+		if _, ok := seenHook[key]; ok {
+			continue
+		}
+		seenHook[key] = struct{}{}
+		for _, tokens := range nftBaseAllowTokens(intent, holes) {
+			b.WriteString("insert rule " + hook.Family + " " + hook.Table + " " + hook.Chain)
+			for i, tok := range tokens {
+				if i == len(tokens)-1 && i > 0 && tokens[i-1] == "comment" {
+					b.WriteString(` "` + tok + `"`)
+					continue
+				}
+				b.WriteString(" " + tok)
+			}
+			b.WriteString("\n")
+		}
+	}
 	return b.String()
 }
 
-func nftRule(rule v2.FirewallRule) string {
-	family := "meta nfproto ipv4"
-	saddr := ""
+func nftRuleTokens(rule v2.FirewallRule) []string {
+	tokens := []string{"meta", "nfproto", "ipv4"}
 	if rule.Stack == v2.FirewallStackV6 {
-		family = "meta nfproto ipv6"
+		tokens = []string{"meta", "nfproto", "ipv6"}
 		if rule.Source != "" {
-			saddr = " ip6 saddr " + rule.Source
+			tokens = append(tokens, "ip6", "saddr", rule.Source)
 		}
 	} else if rule.Source != "" {
-		saddr = " ip saddr " + rule.Source
+		tokens = append(tokens, "ip", "saddr", rule.Source)
 	}
-	spec := rule.Protocol
+	tokens = append(tokens, rule.Protocol)
 	if !allPorts(rule.Port) {
 		port := rule.Port
 		if strings.Contains(port, "-") {
 			from, to := matchPort(port)
 			port = from + "-" + to
 		}
-		spec += " dport " + port
+		tokens = append(tokens, "dport", port)
 	}
-	action := "accept"
 	if rule.Action == v2.FirewallActionDeny {
-		action = "drop"
+		tokens = append(tokens, "drop")
+	} else {
+		tokens = append(tokens, "accept")
 	}
-	return strings.TrimSpace(family + saddr + " " + spec + " " + action)
+	if mark := plusRuleMark(rule); mark != "" {
+		tokens = append(tokens, "comment", mark)
+	}
+	return tokens
+}
+
+func nftRule(rule v2.FirewallRule) string {
+	tokens := nftRuleTokens(rule)
+	if len(tokens) >= 2 && tokens[len(tokens)-2] == "comment" {
+		return strings.Join(tokens[:len(tokens)-1], " ") + ` "` + tokens[len(tokens)-1] + `"`
+	}
+	return strings.Join(tokens, " ")
+}
+
+func plusRuleMark(rule v2.FirewallRule) string {
+	id := strings.TrimSpace(rule.ID)
+	if id == "" {
+		id = strings.TrimSpace(rule.Comment)
+	}
+	if id == "" {
+		id = strings.TrimSpace(rule.Protocol + "-" + rule.Port)
+	}
+	if id == "" {
+		return ""
+	}
+	return plusComment(id)
 }
 
 func nftHole(hole v2.FirewallHole) string {
@@ -901,6 +968,9 @@ func iptablesArgs(rule v2.FirewallRule) []string {
 		} else {
 			args = append(args, "-m", "multiport", "--dports", from+":"+to)
 		}
+	}
+	if mark := plusRuleMark(rule); mark != "" {
+		args = append(args, "-m", "comment", "--comment", mark)
 	}
 	if rule.Action == v2.FirewallActionDeny {
 		args = append(args, "-j", "DROP")

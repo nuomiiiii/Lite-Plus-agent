@@ -61,6 +61,22 @@ func foreignInetInputHooks(raw string) []nftInputHook {
 	return out
 }
 
+func skipManagedInetTable(table string) bool {
+	name := strings.ToLower(strings.TrimSpace(table))
+	return strings.Contains(name, "ufw") || strings.Contains(name, "firewalld")
+}
+
+func attachableInetHooks(hooks []nftInputHook) []nftInputHook {
+	out := make([]nftInputHook, 0, len(hooks))
+	for _, hook := range hooks {
+		if skipManagedInetTable(hook.Table) {
+			continue
+		}
+		out = append(out, hook)
+	}
+	return out
+}
+
 func nftChainJumpsToPlus(listed string) bool {
 	for _, line := range strings.Split(listed, "\n") {
 		if strings.Contains(line, "jump "+plusIptablesChain) {
@@ -70,10 +86,32 @@ func nftChainJumpsToPlus(listed string) bool {
 	return false
 }
 
+func nftInetHeadLive(listed string, wantAllows bool) bool {
+	if !nftChainJumpsToPlus(listed) {
+		return false
+	}
+	if wantAllows && len(nftPlusCommentHandles(listed)) == 0 {
+		return false
+	}
+	return true
+}
+
 func nftJumpHandles(listed string) []string {
+	return nftLineHandles(listed, func(line string) bool {
+		return strings.Contains(line, "jump "+plusIptablesChain)
+	})
+}
+
+func nftPlusCommentHandles(listed string) []string {
+	return nftLineHandles(listed, func(line string) bool {
+		return strings.Contains(line, plusCommentMark)
+	})
+}
+
+func nftLineHandles(listed string, keep func(string) bool) []string {
 	var handles []string
 	for _, line := range strings.Split(listed, "\n") {
-		if !strings.Contains(line, "jump "+plusIptablesChain) {
+		if !keep(line) {
 			continue
 		}
 		const mark = "# handle "

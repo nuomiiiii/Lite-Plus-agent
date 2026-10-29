@@ -118,11 +118,35 @@ func ssSingBoxInbound(in InboundSpec, granted []UserSpec) (map[string]any, bool)
 }
 
 func ssListenNetwork(in InboundSpec) string {
-	raw := strings.ToLower(strings.TrimSpace(settingString(in.SettingsJSON, "ss_network")))
-	raw = strings.ReplaceAll(raw, " ", "")
-	raw = strings.ReplaceAll(raw, "/", ",")
-	raw = strings.ReplaceAll(raw, "+", ",")
-	switch raw {
+	return normalizeSSNetwork(settingString(in.SettingsJSON, "ss_network"))
+}
+
+func ssOutboundNetwork(settings map[string]any) string {
+	if settings == nil {
+		return "tcp,udp"
+	}
+	if raw, _ := settings["ss_network"].(string); strings.TrimSpace(raw) != "" {
+		return normalizeSSNetwork(raw)
+	}
+	raw, _ := settings["transport"].(string)
+	t := strings.ToLower(strings.TrimSpace(raw))
+	t = strings.ReplaceAll(t, " ", "")
+	t = strings.ReplaceAll(t, "/", ",")
+	t = strings.ReplaceAll(t, "+", ",")
+	switch t {
+	case "udp", "tcp,udp":
+		return normalizeSSNetwork(t)
+	default:
+		return "tcp,udp"
+	}
+}
+
+func normalizeSSNetwork(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	s = strings.ReplaceAll(s, " ", "")
+	s = strings.ReplaceAll(s, "/", ",")
+	s = strings.ReplaceAll(s, "+", ",")
+	switch s {
 	case "udp":
 		return "udp"
 	case "tcp":

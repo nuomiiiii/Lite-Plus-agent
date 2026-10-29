@@ -642,6 +642,9 @@ func singBoxProxyOutbound(row OutboundSpec, tag string, tags map[string]string) 
 		if pass, _ := settings["password"].(string); pass != "" {
 			item["password"] = pass
 		}
+		if network := ssOutboundNetwork(settings); network == "tcp" || network == "udp" {
+			item["network"] = network
+		}
 	case "vless", "vmess":
 		if uuid, _ := settings["uuid"].(string); uuid != "" {
 			item["uuid"] = uuid
