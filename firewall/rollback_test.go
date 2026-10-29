@@ -34,6 +34,14 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 		t.Fatal("adopt rollback must restore host rules then re-apply Plus persist")
 	}
 
+	stackRule, err := os.ReadFile("stack_rule.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stackRule), `return strings.TrimSpace(rule.Source) == ""`) {
+		t.Fatal("unsourced rules must not be copied onto the other address family")
+	}
+
 	windows, err := os.ReadFile("windows.go")
 	if err != nil {
 		t.Fatal(err)
@@ -128,7 +136,24 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 		t.Fatal("iptables live check must cover ipv6 INPUT jump as well as ipv4")
 	}
 	if !strings.Contains(textLinux, "ruleAppliesToStack(") {
-		t.Fatal("plus allow rules must land on both ip and ip6 filter when the source is not family-specific")
+		t.Fatal("plus allow rules must stay on the stack declared on the rule")
+	}
+	if !strings.Contains(textLinux, "eachStackedRule(") {
+		t.Fatal("nft, ufw, and firewalld must apply through eachStackedRule so a v6 unsourced allow cannot land on v4")
+	}
+	ufwArgsFn := textLinux[strings.Index(textLinux, "func ufwArgs("):]
+	if end := strings.Index(ufwArgsFn, "\nfunc "); end > 0 {
+		ufwArgsFn = ufwArgsFn[:end]
+	}
+	if !strings.Contains(ufwArgsFn, `"0.0.0.0/0"`) || !strings.Contains(ufwArgsFn, `"::/0"`) {
+		t.Fatal("ufw unsourced allows must pin 0.0.0.0/0 or ::/0 to the declared stack")
+	}
+	nftTok := textLinux[strings.Index(textLinux, "func nftRuleTokens("):]
+	if end := strings.Index(nftTok, "\nfunc "); end > 0 {
+		nftTok = nftTok[:end]
+	}
+	if !strings.Contains(nftTok, `"nfproto", "ipv4"`) || !strings.Contains(nftTok, `"nfproto", "ipv6"`) {
+		t.Fatal("nft inet rules must pin meta nfproto to the declared stack")
 	}
 	if !strings.Contains(textLinux, "attachPlusToForeignInet(") || !strings.Contains(textLinux, "liveForeignInetInputHooks()") {
 		t.Fatal("nft inet filter hosts must join the existing input chain instead of a parallel liteplus table")
@@ -290,5 +315,12 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	addWin := strings.Index(winApply, "addWindowsRule(")
 	if clearWin < 0 || addWin < 0 || clearWin > addWin {
 		t.Fatal("windows apply must clear the Lite Plus group before adding replacements")
+	}
+	addFn := winText[strings.Index(winText, "func addWindowsRule("):]
+	if end := strings.Index(addFn, "\nfunc "); end > 0 {
+		addFn = addFn[:end]
+	}
+	if !strings.Contains(addFn, `"localip=::/0"`) || !strings.Contains(addFn, `"localip=0.0.0.0/0"`) {
+		t.Fatal("windows unsourced allows must pin localip so a v4 rule cannot match ipv6")
 	}
 }

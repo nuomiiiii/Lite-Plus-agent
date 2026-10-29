@@ -294,6 +294,9 @@ func allowCoversHole(intent v2.FirewallIntent, hole v2.FirewallHole) bool {
 		if strings.TrimSpace(rule.Source) != "" {
 			continue
 		}
+		if hole.Stack != "" && !ruleAppliesToStack(rule, hole.Stack) {
+			continue
+		}
 		if !strings.EqualFold(rule.Protocol, hole.Protocol) {
 			continue
 		}

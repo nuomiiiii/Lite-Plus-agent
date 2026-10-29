@@ -288,6 +288,8 @@ func addWindowsRule(rule v2.FirewallRule) error {
 	}
 	if rule.Stack == v2.FirewallStackV6 {
 		args = append(args, "localip=::/0")
+	} else {
+		args = append(args, "localip=0.0.0.0/0")
 	}
 	_, err := runCmd(cmdTimeout, "netsh", args...)
 	return err

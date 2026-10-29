@@ -34,10 +34,11 @@ func ruleAppliesToStack(rule v2.FirewallRule, stack string) bool {
 	if !sourceFitsStack(rule.Source, stack) {
 		return false
 	}
-	if rule.Stack == stack {
+	declared := strings.TrimSpace(rule.Stack)
+	if declared == "" {
 		return true
 	}
-	return strings.TrimSpace(rule.Source) == ""
+	return declared == stack
 }
 
 func holeAppliesToStack(hole v2.FirewallHole, stack string) bool {

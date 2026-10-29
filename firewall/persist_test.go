@@ -118,6 +118,19 @@ func TestLiveHolesDropsCoveredInbound(t *testing.T) {
 	}
 }
 
+func TestLiveHolesDoesNotCoverOtherStack(t *testing.T) {
+	intent := v2.FirewallIntent{
+		DefaultDeny4: true,
+		Rules: []v2.FirewallRule{
+			{Enabled: true, Action: "allow", Protocol: "tcp", Port: "2083", Stack: v2.FirewallStackV6},
+		},
+	}
+	got := liveHoles(intent, []v2.FirewallHole{{Protocol: "tcp", Port: "2083", Stack: v2.FirewallStackV4}})
+	if len(got) != 1 || got[0].Port != "2083" || got[0].Stack != v2.FirewallStackV4 {
+		t.Fatalf("v6 unsourced allow must not cover a v4 hole: %+v", got)
+	}
+}
+
 func TestLoadPersistLegacyIntent(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("AGENT_DATA_DIR", dir)
