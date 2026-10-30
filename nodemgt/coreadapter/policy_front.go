@@ -149,6 +149,7 @@ type policyEngine struct {
 	skipCoreIP map[string]struct{}
 	meterCore  map[string]struct{}
 	coreConns  map[string]map[net.Conn]struct{}
+	dialStack  string
 }
 
 type sharedExec struct {
@@ -180,6 +181,27 @@ func newPolicyEngine() *policyEngine {
 		skipCoreIP: map[string]struct{}{},
 		meterCore:  map[string]struct{}{},
 	}
+}
+
+func (p *policyEngine) setDialStack(stack string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.dialStack = NormalizeDialStack(stack)
+	p.mu.Unlock()
+}
+
+func (p *policyEngine) currentDialStack() string {
+	if p == nil {
+		return dialStackDual
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.dialStack == "" {
+		return dialStackDual
+	}
+	return p.dialStack
 }
 
 func (p *policyEngine) sync(users []UserSpec, denied map[string]struct{}) {
@@ -1449,7 +1471,7 @@ func handlePolicyExitSOCKS(front *spliceFront, client net.Conn, policy *policyEn
 		_, _ = client.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
-	backend, err := dialThroughEgress(hops, dest)
+	backend, err := dialThroughEgress(hops, dest, policy.currentDialStack())
 	if err != nil {
 		_, _ = client.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
@@ -1465,9 +1487,9 @@ func handlePolicyExitSOCKS(front *spliceFront, client net.Conn, policy *policyEn
 	splicePolicy(client, backend, cr, backend, spec.ID, policy)
 }
 
-func dialThroughEgress(hops []egressHop, dest string) (net.Conn, error) {
+func dialThroughEgress(hops []egressHop, dest, stack string) (net.Conn, error) {
 	if len(hops) == 0 {
-		return net.DialTimeout("tcp", dest, 2*time.Second)
+		return dialTCPWithStack(dest, stack, 2*time.Second)
 	}
 	conn, err := net.DialTimeout("tcp", hops[0].Addr, 2*time.Second)
 	if err != nil {

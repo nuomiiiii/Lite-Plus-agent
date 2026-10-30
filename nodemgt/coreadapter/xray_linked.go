@@ -50,6 +50,7 @@ func (c *xrayCore) SetDialStack(stack string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.dialStack = NormalizeDialStack(stack)
+	c.policy.setDialStack(c.dialStack)
 }
 
 func newXrayCore() *xrayCore {
@@ -271,6 +272,7 @@ func (c *xrayCore) restartLocked() error {
 	raw, n, fronts, err := c.buildConfig(live, c.inbounds, c.outbounds, c.routes)
 	if err != nil {
 		c.dialStack = c.lastDialStack
+		c.policy.setDialStack(c.dialStack)
 		return err
 	}
 	_ = c.stopLocked()
@@ -285,6 +287,7 @@ func (c *xrayCore) restartLocked() error {
 	}
 	c.inst = inst
 	c.policy.sync(live, c.denied)
+	c.policy.setDialStack(c.dialStack)
 	started, err := startPolicyFronts(c.policy, fronts)
 	if err != nil {
 		_ = c.stopLocked()
@@ -314,15 +317,18 @@ func (c *xrayCore) restoreLastGood() {
 	raw, n, fronts, err := c.buildConfig(live, c.lastIn, c.lastOut, c.lastRoutes)
 	if err != nil || n == 0 {
 		c.dialStack = attempted
+		c.policy.setDialStack(c.dialStack)
 		return
 	}
 	inst, err := startXrayInstance(raw, c.policy)
 	if err != nil {
 		c.dialStack = attempted
+		c.policy.setDialStack(c.dialStack)
 		return
 	}
 	c.inst = inst
 	c.policy.sync(live, c.denied)
+	c.policy.setDialStack(c.dialStack)
 	started, ferr := startPolicyFronts(c.policy, fronts)
 	if ferr == nil {
 		c.fronts = started

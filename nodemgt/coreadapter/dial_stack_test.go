@@ -2,8 +2,42 @@ package coreadapter
 
 import (
 	"context"
+	"net"
 	"testing"
 )
+
+func TestIPAllowedByStack(t *testing.T) {
+	v4 := net.ParseIP("1.1.1.1")
+	v6 := net.ParseIP("2001:4860:4860::8888")
+	if !ipAllowedByStack(v4, "ipv4") || ipAllowedByStack(v6, "ipv4") {
+		t.Fatal("ipv4-only")
+	}
+	if ipAllowedByStack(v4, "ipv6") || !ipAllowedByStack(v6, "ipv6") {
+		t.Fatal("ipv6-only")
+	}
+	for _, stack := range []string{"dual", "prefer_ipv4", "prefer_ipv6"} {
+		if !ipAllowedByStack(v4, stack) || !ipAllowedByStack(v6, stack) {
+			t.Fatalf("%s must allow both literals", stack)
+		}
+	}
+}
+
+func TestResolveUDPAddrWithStackLiteral(t *testing.T) {
+	if _, err := resolveUDPAddrWithStack("[::1]:53", "ipv4"); err == nil {
+		t.Fatal("ipv4-only must reject ipv6 dest")
+	}
+	if _, err := resolveUDPAddrWithStack("1.1.1.1:53", "ipv6"); err == nil {
+		t.Fatal("ipv6-only must reject ipv4 dest")
+	}
+	got, err := resolveUDPAddrWithStack("1.1.1.1:53", "ipv4")
+	if err != nil || !got.IP.Equal(net.ParseIP("1.1.1.1")) {
+		t.Fatalf("ipv4 dest %v %v", got, err)
+	}
+	got, err = resolveUDPAddrWithStack("[2001:4860:4860::8888]:53", "prefer_ipv4")
+	if err != nil || got.IP.To4() != nil {
+		t.Fatalf("prefer still allows ipv6 literal %v %v", got, err)
+	}
+}
 
 func TestNormalizeDialStack(t *testing.T) {
 	if got := NormalizeDialStack(""); got != dialStackDual {

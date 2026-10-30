@@ -599,6 +599,33 @@ func ss2022RoundTrip(proxyAddr, method, pass, dest string, payload []byte) ([]by
 	return buf, nil
 }
 
+func ssUDPRoundTrip(proxyAddr, method, pass, dest string, payload []byte) ([]byte, error) {
+	raw, err := net.DialTimeout("udp", proxyAddr, 2*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer raw.Close()
+	_ = raw.SetDeadline(time.Now().Add(3 * time.Second))
+	m, err := shadowaead.New(method, nil, pass)
+	if err != nil {
+		return nil, err
+	}
+	pc := m.DialPacketConn(raw)
+	raddr, err := net.ResolveUDPAddr("udp", dest)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := pc.WriteTo(payload, raddr); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 2048)
+	n, _, err := pc.ReadFrom(buf)
+	if err != nil {
+		return nil, err
+	}
+	return buf[:n], nil
+}
+
 func ssTry(proxyAddr, method, pass, dest string) (net.Conn, error) {
 	raw, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
 	if err != nil {

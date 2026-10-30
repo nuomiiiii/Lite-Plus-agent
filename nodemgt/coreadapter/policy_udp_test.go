@@ -75,6 +75,113 @@ func TestSocksUDPHeaderRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPolicyExitTCPConnectEchoIPv6(t *testing.T) {
+	echo := startEchoOn(t, "tcp6", "[::1]:0")
+	if echo == nil {
+		t.Skip("no ipv6 loopback")
+	}
+	defer echo.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newPolicyEngine()
+	p.sync([]UserSpec{{ID: "policy-tcp-v6", UUID: "alice-tcp-v6", Password: "pw"}}, nil)
+	front := &spliceFront{ln: ln}
+	go servePolicyExit(front, frontSpec{}, p)
+	defer front.close()
+	conn := policySOCKSConnect(t, ln.Addr().String(), "alice-tcp-v6", "pw", echo.Addr().String())
+	defer conn.Close()
+	assertTCPEcho(t, conn, []byte("ping-tcp-v6"))
+}
+
+func TestPolicyExitDirectHonorsDialStack(t *testing.T) {
+	v4 := startEcho(t)
+	defer v4.Close()
+	v6 := startEchoOn(t, "tcp6", "[::1]:0")
+	if v6 == nil {
+		t.Skip("no ipv6 loopback")
+	}
+	defer v6.Close()
+	udp4 := startUDPEcho(t)
+	defer udp4.Close()
+	udp6 := startUDPEchoOn(t, "udp6", "[::1]:0")
+	if udp6 == nil {
+		t.Skip("no ipv6 udp")
+	}
+	defer udp6.Close()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newPolicyEngine()
+	p.sync([]UserSpec{{ID: "policy-stack", UUID: "alice-stack", Password: "pw"}}, nil)
+	front := &spliceFront{ln: ln}
+	go servePolicyExit(front, frontSpec{}, p)
+	defer front.close()
+	addr := ln.Addr().String()
+	user, pass := "alice-stack", "pw"
+
+	p.setDialStack("ipv4")
+	if !policyTCPEchoOK(addr, user, pass, v4.Addr().String(), []byte("v4-tcp")) {
+		t.Fatal("ipv4-only must reach ipv4 dest")
+	}
+	if policyTCPEchoOK(addr, user, pass, v6.Addr().String(), []byte("v6-tcp")) {
+		t.Fatal("ipv4-only must not reach ipv6 dest")
+	}
+	if !policyUDPEchoOK(addr, user, pass, udp4.LocalAddr().String(), []byte("v4-udp")) {
+		t.Fatal("ipv4-only must reach ipv4 udp")
+	}
+	if policyUDPEchoOK(addr, user, pass, udp6.LocalAddr().String(), []byte("v6-udp")) {
+		t.Fatal("ipv4-only must drop ipv6 udp")
+	}
+
+	p.setDialStack("ipv6")
+	if policyTCPEchoOK(addr, user, pass, v4.Addr().String(), []byte("v4-tcp6")) {
+		t.Fatal("ipv6-only must not reach ipv4 dest")
+	}
+	if !policyTCPEchoOK(addr, user, pass, v6.Addr().String(), []byte("v6-tcp6")) {
+		t.Fatal("ipv6-only must reach ipv6 dest")
+	}
+	if policyUDPEchoOK(addr, user, pass, udp4.LocalAddr().String(), []byte("v4-udp6")) {
+		t.Fatal("ipv6-only must drop ipv4 udp")
+	}
+	if !policyUDPEchoOK(addr, user, pass, udp6.LocalAddr().String(), []byte("v6-udp6")) {
+		t.Fatal("ipv6-only must reach ipv6 udp")
+	}
+
+	for _, stack := range []string{"dual", "prefer_ipv4", "prefer_ipv6"} {
+		p.setDialStack(stack)
+		if !policyTCPEchoOK(addr, user, pass, v4.Addr().String(), []byte("ok4-"+stack)) {
+			t.Fatalf("%s must reach ipv4 dest", stack)
+		}
+		if !policyTCPEchoOK(addr, user, pass, v6.Addr().String(), []byte("ok6-"+stack)) {
+			t.Fatalf("%s must reach ipv6 dest", stack)
+		}
+	}
+}
+
+func TestPolicyExitHopIgnoresStackForLoopback(t *testing.T) {
+	echo := startEcho(t)
+	defer echo.Close()
+	hopLn, hopClose := startMiniSOCKSUDP(t)
+	defer hopClose()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newPolicyEngine()
+	p.setDialStack("ipv6")
+	p.sync([]UserSpec{{ID: "policy-hop-stack", UUID: "alice-hop-stack", Password: "pw"}}, nil)
+	front := &spliceFront{ln: ln}
+	go servePolicyExit(front, frontSpec{Egress: []egressHop{{Protocol: "socks", Addr: hopLn.Addr().String()}}}, p)
+	defer front.close()
+	conn := policySOCKSConnect(t, ln.Addr().String(), "alice-hop-stack", "pw", echo.Addr().String())
+	defer conn.Close()
+	assertTCPEcho(t, conn, []byte("hop-v6-stack"))
+}
+
 func TestPolicyExitTCPConnectEcho(t *testing.T) {
 	echo := startEcho(t)
 	defer echo.Close()

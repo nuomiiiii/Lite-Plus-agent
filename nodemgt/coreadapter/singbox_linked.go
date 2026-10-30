@@ -49,6 +49,7 @@ func (c *singBoxCore) SetDialStack(stack string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.dialStack = NormalizeDialStack(stack)
+	c.policy.setDialStack(c.dialStack)
 }
 
 func newSingBoxCore() *singBoxCore {
@@ -165,6 +166,7 @@ func (c *singBoxCore) restartLocked() error {
 	raw, n, fronts, err := c.buildConfig(live, c.inbounds, c.outbounds, c.routes)
 	if err != nil {
 		c.dialStack = c.lastDialStack
+		c.policy.setDialStack(c.dialStack)
 		return err
 	}
 	_ = c.stopLocked()
@@ -180,6 +182,7 @@ func (c *singBoxCore) restartLocked() error {
 	c.inst = inst
 	c.cancel = cancel
 	c.policy.sync(live, c.denied)
+	c.policy.setDialStack(c.dialStack)
 	c.inst.Router().AppendTracker(newIPLimitTracker(c.policy))
 	started, err := startPolicyFronts(c.policy, fronts)
 	if err != nil {
@@ -210,16 +213,19 @@ func (c *singBoxCore) restoreLastGood() {
 	raw, n, fronts, err := c.buildConfig(live, c.lastIn, c.lastOut, c.lastRoutes)
 	if err != nil || n == 0 {
 		c.dialStack = attempted
+		c.policy.setDialStack(c.dialStack)
 		return
 	}
 	inst, cancel, err := startSingBox(raw)
 	if err != nil {
 		c.dialStack = attempted
+		c.policy.setDialStack(c.dialStack)
 		return
 	}
 	c.inst = inst
 	c.cancel = cancel
 	c.policy.sync(live, c.denied)
+	c.policy.setDialStack(c.dialStack)
 	c.inst.Router().AppendTracker(newIPLimitTracker(c.policy))
 	started, ferr := startPolicyFronts(c.policy, fronts)
 	if ferr == nil {

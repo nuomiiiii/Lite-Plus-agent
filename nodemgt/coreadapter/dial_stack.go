@@ -1,8 +1,11 @@
 package coreadapter
 
 import (
+	"fmt"
 	"net"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -107,6 +110,99 @@ func hostIsLoopback(host string) bool {
 func stringFromAny(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func ipAllowedByStack(ip net.IP, stack string) bool {
+	if ip == nil {
+		return false
+	}
+	v4 := ip.To4() != nil
+	switch NormalizeDialStack(stack) {
+	case dialStackIPv4:
+		return v4
+	case dialStackIPv6:
+		return !v4
+	default:
+		return true
+	}
+}
+
+func dialTCPWithStack(dest, stack string, timeout time.Duration) (net.Conn, error) {
+	stack = NormalizeDialStack(stack)
+	host, _, err := net.SplitHostPort(dest)
+	if err != nil {
+		return nil, err
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !ipAllowedByStack(ip, stack) {
+			return nil, fmt.Errorf("dial stack %s", stack)
+		}
+		network := "tcp6"
+		if ip.To4() != nil {
+			network = "tcp4"
+		}
+		return net.DialTimeout(network, dest, timeout)
+	}
+	switch stack {
+	case dialStackIPv4:
+		return net.DialTimeout("tcp4", dest, timeout)
+	case dialStackIPv6:
+		return net.DialTimeout("tcp6", dest, timeout)
+	case dialStackPreferIPv4:
+		return dialTCPPrefer(dest, timeout, true)
+	case dialStackPreferIPv6:
+		return dialTCPPrefer(dest, timeout, false)
+	default:
+		return net.DialTimeout("tcp", dest, timeout)
+	}
+}
+
+func dialTCPPrefer(dest string, timeout time.Duration, v4First bool) (net.Conn, error) {
+	first, second := "tcp4", "tcp6"
+	if !v4First {
+		first, second = "tcp6", "tcp4"
+	}
+	conn, err := net.DialTimeout(first, dest, timeout)
+	if err == nil {
+		return conn, nil
+	}
+	return net.DialTimeout(second, dest, timeout)
+}
+
+func resolveUDPAddrWithStack(dest, stack string) (*net.UDPAddr, error) {
+	stack = NormalizeDialStack(stack)
+	host, portStr, err := net.SplitHostPort(dest)
+	if err != nil {
+		return nil, err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 0 || port > 65535 {
+		return nil, fmt.Errorf("udp port")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !ipAllowedByStack(ip, stack) {
+			return nil, fmt.Errorf("udp stack %s", stack)
+		}
+		return &net.UDPAddr{IP: ip, Port: port}, nil
+	}
+	switch stack {
+	case dialStackIPv4:
+		return net.ResolveUDPAddr("udp4", dest)
+	case dialStackIPv6:
+		return net.ResolveUDPAddr("udp6", dest)
+	case dialStackPreferIPv4:
+		if addr, err := net.ResolveUDPAddr("udp4", dest); err == nil {
+			return addr, nil
+		}
+		return net.ResolveUDPAddr("udp6", dest)
+	case dialStackPreferIPv6:
+		if addr, err := net.ResolveUDPAddr("udp6", dest); err == nil {
+			return addr, nil
+		}
+		return net.ResolveUDPAddr("udp4", dest)
+	default:
+		return net.ResolveUDPAddr("udp", dest)
+	}
 }
 
 func applyXrayDialStack(obs []map[string]any, stack string) {

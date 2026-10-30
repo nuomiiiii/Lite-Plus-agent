@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -51,16 +52,31 @@ func handlePolicyExitUDP(front *spliceFront, client net.Conn, policy *policyEngi
 		}
 		_ = hopTCP.SetDeadline(time.Time{})
 	}
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	clientPC, err := listenClientUDP(client)
 	if err != nil {
 		_, _ = client.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
-	wrap := packetConnCloser{pc}
-	front.track(wrap)
-	defer front.drop(wrap)
-	defer pc.Close()
-	reply, err := socks5UDPBindReply(pc.LocalAddr())
+	wan, err := listenWANUDP()
+	if err != nil {
+		_ = clientPC.Close()
+		_, _ = client.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+	clientWrap := packetConnCloser{clientPC}
+	front.track(clientWrap)
+	defer front.drop(clientWrap)
+	defer clientPC.Close()
+	for _, pc := range wan.conns() {
+		wrap := packetConnCloser{pc}
+		front.track(wrap)
+		defer front.drop(wrap)
+	}
+	defer wan.Close()
+	if relay != nil {
+		relay = rewriteUDPBind(relay, hopTCP)
+	}
+	reply, err := socks5UDPBindReply(clientPC.LocalAddr())
 	if err != nil {
 		_, _ = client.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
@@ -70,12 +86,90 @@ func handlePolicyExitUDP(front *spliceFront, client net.Conn, policy *policyEngi
 	}
 	_ = client.SetDeadline(time.Time{})
 	stop := make(chan struct{})
+	var stopOnce sync.Once
+	stopFn := func() { stopOnce.Do(func() { close(stop) }) }
+	defer stopFn()
 	go func() {
-		defer close(stop)
+		defer stopFn()
 		_, _ = io.Copy(io.Discard, client)
 	}()
-	buf := make([]byte, 64*1024)
+	pkts := make(chan policyUDPPkt, 16)
+	go readPolicyUDP(clientPC, false, pkts, stop)
+	for _, pc := range wan.conns() {
+		go readPolicyUDP(pc, true, pkts, stop)
+	}
 	var clientAddr net.Addr
+	for {
+		select {
+		case <-stop:
+			return
+		case pkt, ok := <-pkts:
+			if !ok {
+				return
+			}
+			if pkt.wan {
+				if relay != nil && addrEqual(pkt.from, relay) {
+					if clientAddr == nil {
+						continue
+					}
+					if _, payload, err := parseSocksUDP(pkt.data); err == nil {
+						if !accountPolicyUDP(policy, spec.ID, len(payload), stop) {
+							return
+						}
+					}
+					if _, err := clientPC.WriteTo(pkt.data, clientAddr); err != nil {
+						return
+					}
+					continue
+				}
+				if clientAddr == nil {
+					continue
+				}
+				if !accountPolicyUDP(policy, spec.ID, len(pkt.data), stop) {
+					return
+				}
+				wrapped, err := encodeSocksUDP(pkt.from.String(), pkt.data)
+				if err != nil {
+					continue
+				}
+				if _, err := clientPC.WriteTo(wrapped, clientAddr); err != nil {
+					return
+				}
+				continue
+			}
+			dest, payload, err := parseSocksUDP(pkt.data)
+			if err != nil {
+				continue
+			}
+			clientAddr = pkt.from
+			if !accountPolicyUDP(policy, spec.ID, len(payload), stop) {
+				return
+			}
+			if relay != nil {
+				if _, err := wan.WriteTo(pkt.data, relay); err != nil {
+					return
+				}
+				continue
+			}
+			raddr, err := resolveUDPAddrWithStack(dest, policy.currentDialStack())
+			if err != nil {
+				continue
+			}
+			if _, err := wan.WriteTo(payload, raddr); err != nil {
+				continue
+			}
+		}
+	}
+}
+
+type policyUDPPkt struct {
+	from net.Addr
+	data []byte
+	wan  bool
+}
+
+func readPolicyUDP(pc net.PacketConn, wan bool, out chan<- policyUDPPkt, stop <-chan struct{}) {
+	buf := make([]byte, 64*1024)
 	for {
 		_ = pc.SetReadDeadline(time.Now().Add(2 * time.Second))
 		n, from, err := pc.ReadFrom(buf)
@@ -98,55 +192,127 @@ func handlePolicyExitUDP(front *spliceFront, client net.Conn, policy *policyEngi
 		if n == 0 {
 			continue
 		}
-		pkt := append([]byte(nil), buf[:n]...)
-		if relay != nil && addrEqual(from, relay) {
-			if clientAddr == nil {
-				continue
-			}
-			if _, payload, err := parseSocksUDP(pkt); err == nil {
-				if !accountPolicyUDP(policy, spec.ID, len(payload), stop) {
-					return
-				}
-			}
-			if _, err := pc.WriteTo(pkt, clientAddr); err != nil {
-				return
-			}
-			continue
-		}
-		if dest, payload, err := parseSocksUDP(pkt); err == nil {
-			clientAddr = from
-			if !accountPolicyUDP(policy, spec.ID, len(payload), stop) {
-				return
-			}
-			if relay != nil {
-				if _, err := pc.WriteTo(pkt, relay); err != nil {
-					return
-				}
-				continue
-			}
-			raddr, err := net.ResolveUDPAddr("udp", dest)
-			if err != nil {
-				continue
-			}
-			if _, err := pc.WriteTo(payload, raddr); err != nil {
-				return
-			}
-			continue
-		}
-		if clientAddr == nil {
-			continue
-		}
-		if !accountPolicyUDP(policy, spec.ID, n, stop) {
+		pkt := policyUDPPkt{from: from, data: append([]byte(nil), buf[:n]...), wan: wan}
+		select {
+		case <-stop:
 			return
-		}
-		wrapped, err := encodeSocksUDP(from.String(), pkt)
-		if err != nil {
-			continue
-		}
-		if _, err := pc.WriteTo(wrapped, clientAddr); err != nil {
-			return
+		case out <- pkt:
 		}
 	}
+}
+
+func listenClientUDP(client net.Conn) (net.PacketConn, error) {
+	host := udpBindHostForClient(client)
+	network := "udp"
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.To4() != nil {
+			network = "udp4"
+		} else {
+			network = "udp6"
+		}
+	}
+	return net.ListenPacket(network, net.JoinHostPort(host, "0"))
+}
+
+type wanUDP struct {
+	v4 net.PacketConn
+	v6 net.PacketConn
+}
+
+func listenWANUDP() (*wanUDP, error) {
+	w := &wanUDP{}
+	w.v4, _ = net.ListenPacket("udp4", "0.0.0.0:0")
+	w.v6, _ = net.ListenPacket("udp6", "[::]:0")
+	if w.v4 == nil && w.v6 == nil {
+		return nil, fmt.Errorf("wan udp")
+	}
+	return w, nil
+}
+
+func (w *wanUDP) conns() []net.PacketConn {
+	if w == nil {
+		return nil
+	}
+	out := make([]net.PacketConn, 0, 2)
+	if w.v4 != nil {
+		out = append(out, w.v4)
+	}
+	if w.v6 != nil {
+		out = append(out, w.v6)
+	}
+	return out
+}
+
+func (w *wanUDP) WriteTo(p []byte, addr net.Addr) (int, error) {
+	pc := w.connFor(addr)
+	if pc == nil {
+		return 0, fmt.Errorf("wan udp family")
+	}
+	return pc.WriteTo(p, addr)
+}
+
+func (w *wanUDP) Close() error {
+	if w == nil {
+		return nil
+	}
+	var err error
+	if w.v4 != nil {
+		err = w.v4.Close()
+	}
+	if w.v6 != nil {
+		if e := w.v6.Close(); err == nil {
+			err = e
+		}
+	}
+	return err
+}
+
+func (w *wanUDP) connFor(addr net.Addr) net.PacketConn {
+	if w == nil {
+		return nil
+	}
+	ua, err := udpAddrOf(addr)
+	if err != nil || ua == nil || ua.IP == nil {
+		return w.v4
+	}
+	if ua.IP.To4() == nil {
+		return w.v6
+	}
+	return w.v4
+}
+
+func rewriteUDPBind(bind net.Addr, hop net.Conn) net.Addr {
+	ua, err := udpAddrOf(bind)
+	if err != nil || ua == nil {
+		return bind
+	}
+	if ua.IP != nil && !ua.IP.IsUnspecified() {
+		return ua
+	}
+	host := "127.0.0.1"
+	if hop != nil && hop.RemoteAddr() != nil {
+		if h, _, err := net.SplitHostPort(hop.RemoteAddr().String()); err == nil {
+			if ip := net.ParseIP(h); ip != nil && !ip.IsUnspecified() {
+				host = h
+			}
+		}
+	}
+	return &net.UDPAddr{IP: net.ParseIP(host), Port: ua.Port}
+}
+
+func udpBindHostForClient(client net.Conn) string {
+	if client == nil || client.LocalAddr() == nil {
+		return "127.0.0.1"
+	}
+	host, _, err := net.SplitHostPort(client.LocalAddr().String())
+	if err != nil {
+		return "127.0.0.1"
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsUnspecified() {
+		return "127.0.0.1"
+	}
+	return host
 }
 
 func accountPolicyUDP(policy *policyEngine, userID string, n int, stop <-chan struct{}) bool {
