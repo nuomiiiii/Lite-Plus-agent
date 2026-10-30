@@ -233,8 +233,8 @@ func TestSingBoxRealityVisionKeepsPolicySocks(t *testing.T) {
 	if !strings.Contains(text, `"nodemgt-policy-u1"`) {
 		t.Fatalf("sing-box reality has no vision splice, keep policy SOCKS: %s", text)
 	}
-	if !strings.Contains(text, `"network":"tcp"`) {
-		t.Fatalf("sing-box policy SOCKS must be tcp-only: %s", text)
+	if netw := policySocksNetwork(raw, "nodemgt-policy-u1"); netw == "tcp" {
+		t.Fatalf("sing-box policy SOCKS must accept UDP, got network=%q in %s", netw, text)
 	}
 	if !strings.Contains(text, `"flow":"xtls-rprx-vision"`) {
 		t.Fatalf("sing-box reality inbound must copy vision onto users: %s", text)
@@ -641,6 +641,76 @@ func TestSingBoxSSOutboundHonorsNetwork(t *testing.T) {
 	}})
 	if _, ok := legacy[len(legacy)-1]["network"]; ok {
 		t.Fatalf("legacy tcp dummy must stay both, got %v", legacy[len(legacy)-1])
+	}
+}
+
+func TestSingBoxSSOutboundPolicyAcceptsUDP(t *testing.T) {
+	c := newSingBoxCore()
+	c.users = []UserSpec{{ID: "u1", UUID: vlessAlice, Password: "pw"}}
+	c.inbounds = []InboundSpec{{
+		ID: "reality", Protocol: "vless", Listen: "127.0.0.1", Port: 443,
+		StreamJSON: `{"network":"tcp","security":"reality","realitySettings":{"dest":"127.0.0.1:9","serverNames":["audit.test"],"privateKey":"dGVzdA","shortIds":["abcd"]}}`,
+	}}
+	c.outbounds = []OutboundSpec{{
+		ID: "audit-exit", Name: "audit-exit", Protocol: "shadowsocks", Enabled: true,
+		SettingsJSON: `{"address":"ss.example.com","port":8388,"password":"x","ss_method":"aes-128-gcm"}`,
+	}}
+	c.routes = []RouteSpec{{ID: "business-route", Enabled: true, Priority: 1, RuleJSON: `{"inbound_id":"reality","outbound_id":"audit-exit"}`}}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"nodemgt-policy-u1-audit-exit"`) {
+		t.Fatalf("missing policy socks for ss outbound: %s", text)
+	}
+	if !strings.Contains(text, `"nodemgt-core-audit-exit"`) {
+		t.Fatalf("ss outbound needs core socks inbound: %s", text)
+	}
+	if netw := policySocksNetwork(raw, "nodemgt-policy-u1-audit-exit"); netw == "tcp" {
+		t.Fatalf("policy SOCKS must accept UDP, got network=%q in %s", netw, text)
+	}
+	if coreNet := singBoxInboundNetwork(raw, "nodemgt-core-audit-exit"); coreNet == "tcp" {
+		t.Fatalf("fallback core inbound must accept UDP, got network=%q in %s", coreNet, text)
+	}
+}
+
+func TestSingBoxSSOutboundPolicyNetworkMatrix(t *testing.T) {
+	for _, tc := range []struct {
+		name, extra, wantSS string
+	}{
+		{name: "tcp", extra: `,"ss_network":"tcp"`, wantSS: "tcp"},
+		{name: "udp", extra: `,"ss_network":"udp"`, wantSS: "udp"},
+		{name: "tcp-udp", extra: `,"ss_network":"tcp,udp"`, wantSS: ""},
+		{name: "default", extra: "", wantSS: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newSingBoxCore()
+			c.users = []UserSpec{{ID: "u1", UUID: vlessAlice, Password: "pw"}}
+			c.inbounds = []InboundSpec{{
+				ID: "reality", Protocol: "vless", Listen: "127.0.0.1", Port: 443,
+				StreamJSON: `{"network":"tcp","security":"reality","realitySettings":{"dest":"127.0.0.1:9","serverNames":["audit.test"],"privateKey":"dGVzdA","shortIds":["abcd"]}}`,
+			}}
+			c.outbounds = []OutboundSpec{{
+				ID: "audit-exit", Name: "audit-exit", Protocol: "shadowsocks", Enabled: true,
+				SettingsJSON: `{"address":"ss.example.com","port":8388,"password":"x","ss_method":"aes-128-gcm"` + tc.extra + `}`,
+			}}
+			c.routes = []RouteSpec{{ID: "business-route", Enabled: true, Priority: 1, RuleJSON: `{"inbound_id":"reality","outbound_id":"audit-exit"}`}}
+			raw, err := c.configJSON()
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(raw)
+			if policySocksNetwork(raw, "nodemgt-policy-u1-audit-exit") == "tcp" {
+				t.Fatalf("policy SOCKS pinned tcp: %s", text)
+			}
+			if singBoxInboundNetwork(raw, "nodemgt-core-audit-exit") == "tcp" {
+				t.Fatalf("fallback inbound pinned tcp: %s", text)
+			}
+			if got := taggedJSONNetwork(raw, "outbounds", "audit-exit"); got != tc.wantSS {
+				t.Fatalf("ss outbound network=%q want %q in %s", got, tc.wantSS, text)
+			}
+		})
 	}
 }
 

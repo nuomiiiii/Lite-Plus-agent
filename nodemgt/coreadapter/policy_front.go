@@ -972,7 +972,6 @@ func attachPolicyExit(obs, rules []map[string]any, users []UserSpec, policyTags 
 				"server_port": port,
 				"username":    user,
 				"password":    pass,
-				"network":     "tcp",
 			})
 		}
 		added[tag] = struct{}{}
@@ -995,7 +994,7 @@ func attachPolicyExit(obs, rules []map[string]any, users []UserSpec, policyTags 
 				"listen":   "127.0.0.1",
 				"port":     port,
 				"protocol": "socks",
-				"settings": map[string]any{"auth": "noauth", "udp": false},
+				"settings": map[string]any{"auth": "noauth", "udp": true},
 			})
 			detourRules = append(detourRules, map[string]any{
 				"type":        "field",
@@ -1438,14 +1437,18 @@ func handlePolicyExitSOCKS(front *spliceFront, client net.Conn, policy *policyEn
 	if err != nil {
 		return
 	}
+	sessID := fmt.Sprintf("%s-%d", spec.ID, time.Now().UnixNano())
+	policy.trackSession(&sessions.Session{ID: sessID, UserID: spec.ID, Conn: client, HideIP: true})
+	defer policy.sess.Remove(sessID)
+	if socks5Cmd(req) == 0x03 {
+		handlePolicyExitUDP(front, client, policy, spec, hops)
+		return
+	}
 	dest, err := socks5Dest(req)
 	if err != nil {
 		_, _ = client.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
-	sessID := fmt.Sprintf("%s-%d", spec.ID, time.Now().UnixNano())
-	policy.trackSession(&sessions.Session{ID: sessID, UserID: spec.ID, Conn: client, HideIP: true})
-	defer policy.sess.Remove(sessID)
 	backend, err := dialThroughEgress(hops, dest)
 	if err != nil {
 		_, _ = client.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
@@ -1653,6 +1656,7 @@ func vlessConnectRequest(id []byte, dest string) ([]byte, error) {
 }
 
 func socks5ClientConnect(conn net.Conn, user, pass, dest string) error {
+	setTCPNoDelay(conn)
 	if user != "" {
 		if _, err := conn.Write([]byte{0x05, 0x02, 0x00, 0x02}); err != nil {
 			return err
@@ -1698,27 +1702,38 @@ func socks5ClientConnect(conn net.Conn, user, pass, dest string) error {
 }
 
 func socks5ConnectRequest(dest string) ([]byte, error) {
+	return socks5CommandRequest(0x01, dest)
+}
+
+func socks5CommandRequest(cmd byte, dest string) ([]byte, error) {
+	addr, err := socks5Addr(dest)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte{0x05, cmd, 0x00}, addr...), nil
+}
+
+func socks5Addr(dest string) ([]byte, error) {
 	host, portStr, err := net.SplitHostPort(dest)
 	if err != nil {
 		return nil, err
 	}
 	port, err := strconv.Atoi(portStr)
-	if err != nil || port <= 0 || port > 65535 {
+	if err != nil || port < 0 || port > 65535 {
 		return nil, fmt.Errorf("socks port")
 	}
 	pb := make([]byte, 2)
 	binary.BigEndian.PutUint16(pb, uint16(port))
-	req := []byte{0x05, 0x01, 0x00}
 	if ip := net.ParseIP(host); ip != nil {
 		if v4 := ip.To4(); v4 != nil {
-			return append(append(append(req, 0x01), v4...), pb...), nil
+			return append(append([]byte{0x01}, v4...), pb...), nil
 		}
-		return append(append(append(req, 0x04), ip.To16()...), pb...), nil
+		return append(append([]byte{0x04}, ip.To16()...), pb...), nil
 	}
 	if len(host) > 255 {
 		return nil, fmt.Errorf("socks host")
 	}
-	return append(append(append(req, 0x03, byte(len(host))), host...), pb...), nil
+	return append(append([]byte{0x03, byte(len(host))}, host...), pb...), nil
 }
 
 func socks5SkipReply(r io.Reader) error {
@@ -1781,8 +1796,15 @@ func httpProxyConnect(conn net.Conn, hop egressHop, dest string) error {
 	return fmt.Errorf("http head")
 }
 
+func socks5Cmd(req []byte) byte {
+	if len(req) < 2 {
+		return 0
+	}
+	return req[1]
+}
+
 func socks5Dest(req []byte) (string, error) {
-	if len(req) < 7 || req[0] != 0x05 || req[1] != 0x01 {
+	if len(req) < 7 || req[0] != 0x05 {
 		return "", fmt.Errorf("socks dest")
 	}
 	switch req[3] {
