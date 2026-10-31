@@ -20,6 +20,10 @@ func nftListChain(hook nftInputHook) (string, error) {
 	return runCmd(cmdTimeout, "nft", "-a", "list", "chain", hook.Family, hook.Table, hook.Chain)
 }
 
+func nftListPlusChain(hook nftInputHook) (string, error) {
+	return runCmd(cmdTimeout, "nft", "-a", "list", "chain", hook.Family, hook.Table, plusIptablesChain)
+}
+
 func detachPlusFromForeignInet() {
 	for _, hook := range liveForeignInetInputHooks() {
 		listed, _ := nftListChain(hook)
@@ -56,14 +60,14 @@ func attachPlusToForeignInet(intent v2.FirewallIntent, holes []v2.FirewallHole) 
 		return err
 	}
 	for _, hook := range hooks {
-		if err := ensureNftPlusHead(hook, intent, holes); err != nil {
+		if err := ensureNftPlusHead(hook); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func ensureNftPlusHead(hook nftInputHook, intent v2.FirewallIntent, holes []v2.FirewallHole) error {
+func ensureNftPlusHead(hook nftInputHook) error {
 	listed, _ := nftListChain(hook)
 	for _, handle := range nftJumpHandles(listed) {
 		_, _ = runCmd(cmdTimeout, "nft", "delete", "rule", hook.Family, hook.Table, hook.Chain, "handle", handle)
@@ -71,17 +75,8 @@ func ensureNftPlusHead(hook nftInputHook, intent v2.FirewallIntent, holes []v2.F
 	for _, handle := range nftPlusCommentHandles(listed) {
 		_, _ = runCmd(cmdTimeout, "nft", "delete", "rule", hook.Family, hook.Table, hook.Chain, "handle", handle)
 	}
-	if _, err := runCmd(cmdTimeout, "nft", "insert", "rule", hook.Family, hook.Table, hook.Chain, "jump", plusIptablesChain); err != nil {
-		return err
-	}
-	allows := nftBaseAllowTokens(intent, holes)
-	for i := len(allows) - 1; i >= 0; i-- {
-		args := append([]string{"insert", "rule", hook.Family, hook.Table, hook.Chain}, nftQuotedTokens(allows[i])...)
-		if _, err := runCmd(cmdTimeout, "nft", args...); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := runCmd(cmdTimeout, "nft", "insert", "rule", hook.Family, hook.Table, hook.Chain, "jump", plusIptablesChain)
+	return err
 }
 
 func nftBaseAllowTokens(intent v2.FirewallIntent, holes []v2.FirewallHole) [][]string {
@@ -122,8 +117,12 @@ func nftPlusLive() bool {
 	}
 	wantAllows := nftPersistWantsBaseAllows()
 	for _, hook := range hooks {
-		listed, err := nftListChain(hook)
-		if err != nil || !nftInetHeadLive(listed, wantAllows) {
+		hostListed, err := nftListChain(hook)
+		if err != nil {
+			return false
+		}
+		plusListed, err := nftListPlusChain(hook)
+		if err != nil || !nftAttachLive(hostListed, plusListed, wantAllows) {
 			return false
 		}
 	}
@@ -146,8 +145,13 @@ func plusRulesStaleLinux() bool {
 	wantAllows := nftPersistWantsBaseAllows()
 	if len(hooks) > 0 {
 		for _, hook := range hooks {
-			listed, err := nftListChain(hook)
-			if err != nil || !nftInetHeadLive(listed, wantAllows) {
+			hostListed, err := nftListChain(hook)
+			if err != nil {
+				inetJumpLive = false
+				break
+			}
+			plusListed, err := nftListPlusChain(hook)
+			if err != nil || !nftAttachLive(hostListed, plusListed, wantAllows) {
 				inetJumpLive = false
 				break
 			}

@@ -150,8 +150,11 @@ func TestNftAttachScriptFlushesBeforeRules(t *testing.T) {
 	if flushAt > allowAt || flushAt > dropAt {
 		t.Fatal("flush must come before plus rules so a second apply does not leave the old drop in front of new allows")
 	}
-	if !strings.Contains(script, "insert rule inet filter input") || !strings.Contains(script, `comment "lite-plus:web"`) {
-		t.Fatal("attach script must insert plus allows into inet input so a later policy drop cannot ignore jumped accepts")
+	if strings.Contains(script, "insert rule inet filter input") {
+		t.Fatal("attach must not copy plus allows onto host input; jump accept is final in this chain")
+	}
+	if !strings.Contains(script, `comment "lite-plus:web"`) {
+		t.Fatal("LITE_PLUS body must keep marked allows")
 	}
 }
 

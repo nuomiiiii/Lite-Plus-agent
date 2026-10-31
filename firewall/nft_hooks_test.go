@@ -64,33 +64,40 @@ func TestAttachableInetHooksSkipsUfwAndFirewalld(t *testing.T) {
 	}
 }
 
-func TestNftInetHeadLiveRequiresBaseAllows(t *testing.T) {
-	jumpOnly := `chain input {
+func TestNftAttachLiveLooksAtPlusChainNotHostInput(t *testing.T) {
+	hostJump := `chain input {
 	jump LITE_PLUS # handle 7
 	tcp dport 22 accept # handle 8
 }
 `
-	if nftInetHeadLive(jumpOnly, false) != true {
+	plusAllows := `chain LITE_PLUS {
+	meta nfproto ipv4 tcp dport 45633 accept comment "lite-plus:abc" # handle 9
+	meta nfproto ipv4 drop # handle 10
+}
+`
+	if nftAttachLive(hostJump, plusAllows, false) != true {
 		t.Fatal("jump is enough when plus has no base allows")
 	}
-	if nftInetHeadLive(jumpOnly, true) {
-		t.Fatal("jumped accept is not enough when plus allows must sit in the host input chain")
+	if nftAttachLive(hostJump, `chain LITE_PLUS { meta nfproto ipv4 drop }`, true) {
+		t.Fatal("plus allows must live in LITE_PLUS, not only as a jump")
 	}
-	withAllow := `chain input {
+	if !nftAttachLive(hostJump, plusAllows, true) {
+		t.Fatal("jump plus marked allows in LITE_PLUS must count as live")
+	}
+	withoutHandles := `chain LITE_PLUS {
+	meta nfproto ipv4 tcp dport 45633 accept comment "lite-plus:abc"
+}
+`
+	if !nftAttachLive(hostJump, withoutHandles, true) {
+		t.Fatal("nftables 1.1.3 omits # handle without -a; marked allows in LITE_PLUS must still count as live")
+	}
+	hostWithCopy := `chain input {
 	meta nfproto ipv4 tcp dport 45633 accept comment "lite-plus:abc" # handle 9
 	jump LITE_PLUS # handle 7
 }
 `
-	if !nftInetHeadLive(withAllow, true) {
-		t.Fatal("jump plus marked allows must count as live")
-	}
-	withoutHandles := `chain input {
-	meta nfproto ipv4 tcp dport 45633 accept comment "lite-plus:abc"
-	jump LITE_PLUS
-}
-`
-	if !nftInetHeadLive(withoutHandles, true) {
-		t.Fatal("nftables 1.1.3 omits # handle without -a; marked allows must still count as live")
+	if nftAttachLive(hostWithCopy, plusAllows, true) {
+		t.Fatal("leftover lite-plus comments on host input must be migrated off")
 	}
 }
 

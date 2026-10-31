@@ -780,21 +780,6 @@ func nftAttachScript(hooks []nftInputHook, intent v2.FirewallIntent, holes []v2.
 		b.WriteString(body)
 		b.WriteString("  }\n}\n")
 	}
-	seenHook := map[string]struct{}{}
-	for _, hook := range hooks {
-		key := hook.Family + " " + hook.Table + " " + hook.Chain
-		if _, ok := seenHook[key]; ok {
-			continue
-		}
-		seenHook[key] = struct{}{}
-		for _, tokens := range nftBaseAllowTokens(intent, holes) {
-			b.WriteString("insert rule " + hook.Family + " " + hook.Table + " " + hook.Chain)
-			for _, tok := range nftQuotedTokens(tokens) {
-				b.WriteString(" " + tok)
-			}
-			b.WriteString("\n")
-		}
-	}
 	return b.String()
 }
 

@@ -86,11 +86,19 @@ func nftChainJumpsToPlus(listed string) bool {
 	return false
 }
 
-func nftInetHeadLive(listed string, wantAllows bool) bool {
-	if !nftChainJumpsToPlus(listed) {
+// nftAttachLive reports that Plus is on the host inet input without copying
+// allows onto that chain. A jump into LITE_PLUS that accepts is already final
+// for this base chain; extra host-input allows were only feeding the live
+// check. Leftover lite-plus comments on the host chain are the previous
+// dual-write and must be migrated once.
+func nftAttachLive(hostListed, plusListed string, wantAllows bool) bool {
+	if !nftChainJumpsToPlus(hostListed) {
 		return false
 	}
-	if wantAllows && !nftPlusCommentsLive(listed) {
+	if nftPlusCommentsLive(hostListed) {
+		return false
+	}
+	if wantAllows && !nftPlusCommentsLive(plusListed) {
 		return false
 	}
 	return true

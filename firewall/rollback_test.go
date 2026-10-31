@@ -214,11 +214,11 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(attachLinux), "ensureNftPlusHead(") || !strings.Contains(string(attachLinux), "nftBaseAllowTokens(") {
-		t.Fatal("inet attach must insert plus accepts into the foreign input chain")
+	if !strings.Contains(string(attachLinux), "ensureNftPlusHead(") || !strings.Contains(string(attachLinux), "nftListPlusChain(") {
+		t.Fatal("inet attach must jump into LITE_PLUS and list that chain for live allows")
 	}
-	if !strings.Contains(string(attachLinux), "nftQuotedTokens(") {
-		t.Fatal("inet argv insert must quote lite-plus comments so nft does not treat the colon as syntax")
+	if strings.Contains(string(attachLinux), "nftQuotedTokens(") {
+		t.Fatal("inet attach must not insert plus allows onto the host input chain")
 	}
 	if strings.Contains(string(attachLinux), `"nft", "list", "chain"`) {
 		t.Fatal("listing inet input must use nft -a; nftables 1.1.3 omits handles without -a so allow rules look missing")
@@ -226,8 +226,8 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(string(attachLinux), `nft", "-a", "list", "chain"`) {
 		t.Fatal("live and stale checks must list inet input with handles")
 	}
-	if !strings.Contains(textLinux, `"insert rule "`) {
-		t.Fatal("attach script must insert plus allows into the host input chain so policy drop cannot ignore jumped accepts")
+	if strings.Contains(attachFn, "insert rule ") {
+		t.Fatal("attach script must not copy plus allows onto host input; jump accept is final in this chain")
 	}
 	ufwFn := textLinux[strings.Index(textLinux, "func applyUFW("):]
 	if end := strings.Index(ufwFn, "\nfunc "); end > 0 {
