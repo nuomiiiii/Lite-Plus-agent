@@ -10,7 +10,6 @@ import (
 	"sync"
 
 	box "github.com/sagernet/sing-box"
-	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
 	singjson "github.com/sagernet/sing/common/json"
 )
@@ -20,14 +19,14 @@ func init() {
 }
 
 type singBoxCore struct {
-	mu         sync.Mutex
-	inst       *box.Box
-	cancel     context.CancelFunc
-	users      []UserSpec
-	inbounds   []InboundSpec
-	outbounds  []OutboundSpec
-	routes     []RouteSpec
-	denied     map[string]struct{}
+	mu            sync.Mutex
+	inst          *box.Box
+	cancel        context.CancelFunc
+	users         []UserSpec
+	inbounds      []InboundSpec
+	outbounds     []OutboundSpec
+	routes        []RouteSpec
+	denied        map[string]struct{}
 	lastUsers     []UserSpec
 	lastIn        []InboundSpec
 	lastOut       []OutboundSpec
@@ -35,7 +34,7 @@ type singBoxCore struct {
 	dialStack     string
 	lastDialStack string
 	fronts        []*spliceFront
-	policy     *policyEngine
+	policy        *policyEngine
 }
 
 func (c *singBoxCore) SetForwarding(outbounds []OutboundSpec, routes []RouteSpec) {
@@ -235,7 +234,7 @@ func (c *singBoxCore) restoreLastGood() {
 }
 
 func startSingBox(raw []byte) (*box.Box, context.CancelFunc, error) {
-	ctx, cancel := context.WithCancel(include.Context(context.Background()))
+	ctx, cancel := context.WithCancel(singBoxContext(context.Background()))
 	opts, err := singjson.UnmarshalExtendedContext[option.Options](ctx, raw)
 	if err != nil {
 		cancel()

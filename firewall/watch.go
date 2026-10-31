@@ -5,16 +5,42 @@ import (
 	"time"
 )
 
-const ownedWatchEvery = 3 * time.Second
+const (
+	stackWatchEvery = time.Second
+	ownedWatchEvery = 3 * time.Second
+)
 
 func WatchOwned() {
-	ticker := time.NewTicker(ownedWatchEvery)
-	defer ticker.Stop()
-	for range ticker.C {
-		if err := ensureOwned(); err != nil {
-			log.Printf("firewall restore after host flush: %v", err)
+	stackTick := time.NewTicker(stackWatchEvery)
+	ownedTick := time.NewTicker(ownedWatchEvery)
+	defer stackTick.Stop()
+	defer ownedTick.Stop()
+	for {
+		select {
+		case <-stackTick.C:
+			if err := ensureStacks(); err != nil {
+				log.Printf("firewall restore after stack change: %v", err)
+			}
+		case <-ownedTick.C:
+			if err := ensureOwned(); err != nil {
+				log.Printf("firewall restore after host flush: %v", err)
+			}
 		}
 	}
+}
+
+func ensureStacks() error {
+	opMu.Lock()
+	defer opMu.Unlock()
+	state := loadPersist()
+	if state == nil || intentIdle(state.Intent) {
+		return nil
+	}
+	if !stacksChangedSincePersist() {
+		return nil
+	}
+	log.Printf("firewall host stacks changed; restoring plus rules onto the new stack")
+	return restorePersistedLocked()
 }
 
 func ensureOwned() error {

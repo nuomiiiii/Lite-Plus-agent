@@ -2,7 +2,7 @@
 
 Lite-Plus 的跨平台节点监控与节点管理 Agent。本仓库版本在基础监控之外，支持安全远程终端、文件管理、远程命令、Cloudflare Access、在线配置下发、配置结果回执，以及双核节点管理。
 
-当前稳定版本：`0.0.2.7`
+当前稳定版本：`0.0.2.8`
 
 使用 MCP 代理功能，Lite需升级至 2.3.3 或更高版本。
 
@@ -59,7 +59,7 @@ docker pull ghcr.io/nuomiiiii/lite-plus-agent:latest
 也可以拉取固定版本：
 
 ```bash
-docker pull ghcr.io/nuomiiiii/lite-plus-agent:0.0.2.7
+docker pull ghcr.io/nuomiiiii/lite-plus-agent:0.0.2.8
 ```
 
 容器的启动参数、宿主机目录挂载和节点 Token 请以 Lite 后台生成的部署命令为准。Docker 部署不会在容器内替换 Agent 二进制；升级时需拉取新镜像并重建容器。
@@ -223,6 +223,7 @@ Client ID 与 Client Secret 必须成对配置，可以选择命令行参数、�
 
 | 版本 | 主要内容 |
 | --- | --- |
+| `0.0.2.8` | 修复部分防火墙放行写不进本机入站表的 bug。修复只有回环或链路本地地址时仍按双栈落地、可能把另一边锁死的 bug。安装包和空载占用减小。 |
 | `0.0.2.7` | 修复开启在线 IP 限制后，出站地址族不生效，以及 UDP 无法按 IPv4 / IPv6 出站的 bug。 |
 | `0.0.2.6` | 修复开启在线 IP 限制后，UDP 无法出站的 bug。 |
 | `0.0.2.5` | 本机没有可用防火墙时，可在后台安装 nftables。修复再次保存或重启后旧的默认拒绝仍排在新放行前面、可能被挡在墙外的 bug。Shadowsocks 出站可选择 TCP、UDP 或 TCP, UDP。 |

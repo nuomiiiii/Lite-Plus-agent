@@ -789,11 +789,7 @@ func nftAttachScript(hooks []nftInputHook, intent v2.FirewallIntent, holes []v2.
 		seenHook[key] = struct{}{}
 		for _, tokens := range nftBaseAllowTokens(intent, holes) {
 			b.WriteString("insert rule " + hook.Family + " " + hook.Table + " " + hook.Chain)
-			for i, tok := range tokens {
-				if i == len(tokens)-1 && i > 0 && tokens[i-1] == "comment" {
-					b.WriteString(` "` + tok + `"`)
-					continue
-				}
+			for _, tok := range nftQuotedTokens(tokens) {
 				b.WriteString(" " + tok)
 			}
 			b.WriteString("\n")
@@ -833,11 +829,7 @@ func nftRuleTokens(rule v2.FirewallRule) []string {
 }
 
 func nftRule(rule v2.FirewallRule) string {
-	tokens := nftRuleTokens(rule)
-	if len(tokens) >= 2 && tokens[len(tokens)-2] == "comment" {
-		return strings.Join(tokens[:len(tokens)-1], " ") + ` "` + tokens[len(tokens)-1] + `"`
-	}
-	return strings.Join(tokens, " ")
+	return strings.Join(nftQuotedTokens(nftRuleTokens(rule)), " ")
 }
 
 func plusRuleMark(rule v2.FirewallRule) string {
@@ -1221,4 +1213,3 @@ func firewalldDirect(permanent bool, args ...string) error {
 	_, err := runCmd(cmdTimeout, "firewall-cmd", cmd...)
 	return err
 }
-

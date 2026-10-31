@@ -11,8 +11,6 @@ import (
 
 	xraycore "github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/stats"
-
-	_ "github.com/xtls/xray-core/main/distro/all"
 )
 
 func init() {
@@ -20,23 +18,23 @@ func init() {
 }
 
 type xrayCore struct {
-	mu          sync.Mutex
-	inst        *xraycore.Instance
-	users       []UserSpec
-	inbounds    []InboundSpec
-	outbounds   []OutboundSpec
-	routes      []RouteSpec
-	denied      map[string]struct{}
-	lastUsers   []UserSpec
-	lastIn      []InboundSpec
-	lastOut      []OutboundSpec
-	lastRoutes   []RouteSpec
-	dialStack    string
+	mu            sync.Mutex
+	inst          *xraycore.Instance
+	users         []UserSpec
+	inbounds      []InboundSpec
+	outbounds     []OutboundSpec
+	routes        []RouteSpec
+	denied        map[string]struct{}
+	lastUsers     []UserSpec
+	lastIn        []InboundSpec
+	lastOut       []OutboundSpec
+	lastRoutes    []RouteSpec
+	dialStack     string
 	lastDialStack string
-	lastTraffic  map[string]int64
-	lastSeen    map[string]int64
-	fronts      []*spliceFront
-	policy      *policyEngine
+	lastTraffic   map[string]int64
+	lastSeen      map[string]int64
+	fronts        []*spliceFront
+	policy        *policyEngine
 }
 
 func (c *xrayCore) SetForwarding(outbounds []OutboundSpec, routes []RouteSpec) {

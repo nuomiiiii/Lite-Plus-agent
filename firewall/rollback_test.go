@@ -19,6 +19,20 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(rollback, "resetOwned()") || !strings.Contains(rollback, "loadPersist()") {
 		t.Fatal("first failed apply must clear owned rules when nothing is persisted yet")
 	}
+	snapFn := text[strings.Index(text, "func Snapshot("):]
+	if end := strings.Index(snapFn, "\nfunc "); end > 0 {
+		snapFn = snapFn[:end]
+	}
+	if !strings.Contains(snapFn, "stacksChangedSincePersist()") || !strings.Contains(snapFn, "restorePersistedLocked()") {
+		t.Fatal("snapshot must reapply persisted rules when host stacks change")
+	}
+	applyFn := text[strings.Index(text, "func Apply("):]
+	if end := strings.Index(applyFn, "\nfunc "); end > 0 {
+		applyFn = applyFn[:end]
+	}
+	if !strings.Contains(applyFn, "unifyPairedPolicy(&intent)") {
+		t.Fatal("apply must persist the ping/deny switch onto both stacks")
+	}
 	adopt := text[strings.Index(text, "func Adopt("):]
 	if end := strings.Index(adopt, "\nfunc "); end > 0 {
 		adopt = adopt[:end]
@@ -112,8 +126,8 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(watch), "engOwned(") || !strings.Contains(string(watch), "restorePersistedLocked()") || !strings.Contains(string(watch), "plusRulesStale(") {
-		t.Fatal("watch must restore after a host flush and when plus still sits on a leftover inet table")
+	if !strings.Contains(string(watch), "engOwned(") || !strings.Contains(string(watch), "restorePersistedLocked()") || !strings.Contains(string(watch), "plusRulesStale(") || !strings.Contains(string(watch), "stacksChangedSincePersist(") || !strings.Contains(string(watch), "stackWatchEvery") || !strings.Contains(string(watch), "ensureStacks(") {
+		t.Fatal("watch must restore after a host flush, stack change, and leftover inet table")
 	}
 	stale, err := os.ReadFile("plus_stale.go")
 	if err != nil {
@@ -203,6 +217,9 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(string(attachLinux), "ensureNftPlusHead(") || !strings.Contains(string(attachLinux), "nftBaseAllowTokens(") {
 		t.Fatal("inet attach must insert plus accepts into the foreign input chain")
 	}
+	if !strings.Contains(string(attachLinux), "nftQuotedTokens(") {
+		t.Fatal("inet argv insert must quote lite-plus comments so nft does not treat the colon as syntax")
+	}
 	if !strings.Contains(textLinux, `"insert rule "`) {
 		t.Fatal("attach script must insert plus allows into the host input chain so policy drop cannot ignore jumped accepts")
 	}
@@ -215,7 +232,7 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if clearUfw < 0 || addUfw < 0 || clearUfw > addUfw {
 		t.Fatal("ufw apply must delete plus-owned rules before adding replacements")
 	}
-	applyFn := textLinux[strings.Index(textLinux, "func (b linuxBackend) apply("):]
+	applyFn = textLinux[strings.Index(textLinux, "func (b linuxBackend) apply("):]
 	if end := strings.Index(applyFn, "\nfunc "); end > 0 {
 		applyFn = applyFn[:end]
 	}

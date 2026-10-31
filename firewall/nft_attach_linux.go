@@ -72,7 +72,7 @@ func ensureNftPlusHead(hook nftInputHook, intent v2.FirewallIntent, holes []v2.F
 	}
 	allows := nftBaseAllowTokens(intent, holes)
 	for i := len(allows) - 1; i >= 0; i-- {
-		args := append([]string{"insert", "rule", hook.Family, hook.Table, hook.Chain}, allows[i]...)
+		args := append([]string{"insert", "rule", hook.Family, hook.Table, hook.Chain}, nftQuotedTokens(allows[i])...)
 		if _, err := runCmd(cmdTimeout, "nft", args...); err != nil {
 			return err
 		}

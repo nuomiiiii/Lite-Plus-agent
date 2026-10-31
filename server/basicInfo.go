@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	monitoring "github.com/nuomiiiii/lite-agent/monitoring/unit"
@@ -15,11 +16,14 @@ import (
 	pkg_flags "github.com/nuomiiiii/lite-agent/cmd/flags"
 )
 
+const addressWatchEvery = 30 * time.Second
+
 var flags = pkg_flags.GlobalConfig
 
 var runtimeConfigStateUploadRequests = make(chan struct{}, 1)
 
 func DoUploadBasicInfoWorks() {
+	go watchHostAddresses()
 	ticker := time.NewTicker(time.Duration(flags.InfoReportInterval) * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
@@ -29,6 +33,28 @@ func DoUploadBasicInfoWorks() {
 		}
 	}
 }
+
+func watchHostAddresses() {
+	ticker := time.NewTicker(addressWatchEvery)
+	defer ticker.Stop()
+	var last4, last6 string
+	for {
+		next4, next6, _ := monitoring.GetIPAddress()
+		if addressesChanged(last4, last6, next4, next6) {
+			if err := uploadBasicInfo(); err != nil {
+				log.Println("Error uploading address change:", err)
+			} else {
+				last4, last6 = next4, next6
+			}
+		}
+		<-ticker.C
+	}
+}
+
+func addressesChanged(prev4, prev6, next4, next6 string) bool {
+	return strings.TrimSpace(prev4) != strings.TrimSpace(next4) || strings.TrimSpace(prev6) != strings.TrimSpace(next6)
+}
+
 func UpdateBasicInfo() {
 	err := uploadBasicInfo()
 	if err != nil {

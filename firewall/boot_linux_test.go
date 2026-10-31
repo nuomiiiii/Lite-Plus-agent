@@ -155,6 +155,32 @@ func TestNftAttachScriptFlushesBeforeRules(t *testing.T) {
 	}
 }
 
+func TestNftQuotedTokensQuotesColonInComment(t *testing.T) {
+	tokens := nftRuleTokens(v2.FirewallRule{
+		ID:       "KbAJgCJ5u1E19ehO",
+		Enabled:  true,
+		Action:   v2.FirewallActionAllow,
+		Protocol: "tcp",
+		Port:     "42223",
+		Stack:    v2.FirewallStackV4,
+	})
+	quoted := nftQuotedTokens(tokens)
+	if len(quoted) < 2 || quoted[len(quoted)-2] != "comment" || quoted[len(quoted)-1] != `"lite-plus:KbAJgCJ5u1E19ehO"` {
+		t.Fatalf("argv insert must quote lite-plus comments: %+v", quoted)
+	}
+	line := nftRule(v2.FirewallRule{
+		ID:       "keep-v6-15321",
+		Enabled:  true,
+		Action:   v2.FirewallActionAllow,
+		Protocol: "tcp",
+		Port:     "15321",
+		Stack:    v2.FirewallStackV6,
+	})
+	if !strings.Contains(line, `comment "lite-plus:keep-v6-15321"`) || strings.Contains(line, `comment lite-plus:keep-v6-15321`) {
+		t.Fatalf("nft text must quote comments: %s", line)
+	}
+}
+
 func TestNftTableScriptFlushesBeforeRules(t *testing.T) {
 	script := nftTableScript(v2.FirewallIntent{
 		DefaultDeny4: true,

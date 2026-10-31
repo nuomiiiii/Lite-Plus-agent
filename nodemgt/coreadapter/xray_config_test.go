@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
 	singjson "github.com/sagernet/sing/common/json"
 )
@@ -36,7 +35,7 @@ func TestSingBoxDialStackWritesResolver(t *testing.T) {
 			t.Fatalf("missing %s in %s", part, text)
 		}
 	}
-	ctx := include.Context(context.Background())
+	ctx := singBoxContext(context.Background())
 	if _, err := singjson.UnmarshalExtendedContext[option.Options](ctx, raw); err != nil {
 		t.Fatalf("sing-box options: %v\n%s", err, text)
 	}
@@ -775,7 +774,7 @@ func TestSingBoxAnyTLSPolicyConfigParses(t *testing.T) {
 	if !strings.Contains(string(raw), `"auth_user"`) {
 		t.Fatalf("expected auth_user policy rule: %s", raw)
 	}
-	ctx := include.Context(context.Background())
+	ctx := singBoxContext(context.Background())
 	if _, err := singjson.UnmarshalExtendedContext[option.Options](ctx, raw); err != nil {
 		t.Fatalf("sing-box rejected anytls policy: %v\n%s", err, raw)
 	}
@@ -791,7 +790,7 @@ func TestSingBoxConfigParsesLeftoverOutboundSSMethod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := include.Context(context.Background())
+	ctx := singBoxContext(context.Background())
 	if _, err := singjson.UnmarshalExtendedContext[option.Options](ctx, raw); err != nil {
 		t.Fatalf("sing-box rejected leftover ss_method: %v\n%s", err, raw)
 	}

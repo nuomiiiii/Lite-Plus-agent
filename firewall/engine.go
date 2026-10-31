@@ -2,6 +2,7 @@ package firewall
 
 import (
 	"encoding/json"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -30,6 +31,11 @@ type backend interface {
 func Snapshot() v2.FirewallResultParams {
 	opMu.Lock()
 	defer opMu.Unlock()
+	if stacksChangedSincePersist() {
+		if err := restorePersistedLocked(); err != nil {
+			log.Printf("firewall restore after stack change: %v", err)
+		}
+	}
 	return withStacks(currentBackend().snapshot())
 }
 
@@ -42,6 +48,7 @@ func InstallNftables() v2.FirewallResultParams {
 func Apply(intent v2.FirewallIntent, holes []v2.FirewallHole) v2.FirewallResultParams {
 	opMu.Lock()
 	defer opMu.Unlock()
+	unifyPairedPolicy(&intent)
 	eng := currentBackend()
 	result := withStacks(eng.snapshot())
 	result.Kind = v2.FirewallKindApply
@@ -174,25 +181,50 @@ func withStacks(result v2.FirewallResultParams) v2.FirewallResultParams {
 func stackPresent() (v4, v6 bool) {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
-		return true, true
+		if known4, known6, ok := lastKnownStacks(); ok {
+			return known4, known6
+		}
+		return false, false
 	}
+	return stacksFromAddrs(addrs)
+}
+
+func lastKnownStacks() (v4, v6 bool, ok bool) {
+	state := loadPersist()
+	if state == nil || !state.AppliedStacks {
+		return false, false, false
+	}
+	return state.AppliedV4, state.AppliedV6, true
+}
+
+func stacksFromAddrs(addrs []net.Addr) (v4, v6 bool) {
 	for _, addr := range addrs {
-		ipnet, ok := addr.(*net.IPNet)
-		if !ok {
+		ip := addrIP(addr)
+		if !usableFirewallIP(ip) {
 			continue
 		}
-		if ipnet.IP.To4() != nil {
+		if ip.To4() != nil {
 			v4 = true
 			continue
 		}
-		if ipnet.IP.To16() != nil {
-			v6 = true
-		}
-	}
-	if !v4 && !v6 {
-		return true, true
+		v6 = true
 	}
 	return v4, v6
+}
+
+func addrIP(addr net.Addr) net.IP {
+	switch v := addr.(type) {
+	case *net.IPNet:
+		return v.IP
+	case *net.IPAddr:
+		return v.IP
+	default:
+		return nil
+	}
+}
+
+func usableFirewallIP(ip net.IP) bool {
+	return ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsUnspecified()
 }
 
 func stackAllowed(stack string) bool {
@@ -225,6 +257,9 @@ type persistedFirewall struct {
 	ListenHoles   []v2.FirewallHole `json:"listen_holes,omitempty"`
 	UfwIncoming   string            `json:"ufw_incoming,omitempty"`
 	WindowsPolicy string            `json:"windows_policy,omitempty"`
+	AppliedStacks bool              `json:"applied_stacks,omitempty"`
+	AppliedV4     bool              `json:"applied_v4,omitempty"`
+	AppliedV6     bool              `json:"applied_v6,omitempty"`
 }
 
 var lastWindowsPolicy string
@@ -260,6 +295,7 @@ func restorePersistedLocked() error {
 	if state == nil {
 		return nil
 	}
+	v2.UnifyPairedPolicy(&state.Intent)
 	lastWindowsPolicy = state.WindowsPolicy
 	eng := currentBackend()
 	snap := eng.snapshot()
@@ -356,11 +392,32 @@ func intentIdle(intent v2.FirewallIntent) bool {
 	return true
 }
 
+func unifyPairedPolicy(intent *v2.FirewallIntent) {
+	v2.UnifyPairedPolicy(intent)
+}
+
+func stacksChangedSincePersist() bool {
+	state := loadPersist()
+	if state == nil {
+		return false
+	}
+	v4, v6 := stackPresent()
+	if !state.AppliedStacks {
+		return true
+	}
+	return v4 != state.AppliedV4 || v6 != state.AppliedV6
+}
+
 func persistState(intent v2.FirewallIntent, holes []v2.FirewallHole) error {
+	unifyPairedPolicy(&intent)
+	v4, v6 := stackPresent()
 	state := persistedFirewall{
 		Intent:        intent,
 		ListenHoles:   holes,
 		WindowsPolicy: lastWindowsPolicy,
+		AppliedStacks: true,
+		AppliedV4:     v4,
+		AppliedV6:     v6,
 	}
 	if prev := loadPersist(); prev != nil && state.WindowsPolicy == "" {
 		state.WindowsPolicy = prev.WindowsPolicy

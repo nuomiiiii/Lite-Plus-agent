@@ -6,8 +6,9 @@ import (
 )
 
 const (
-	publicIPCacheTTL = 6 * time.Hour
-	nicIPCacheTTL    = 10 * time.Minute
+	completePublicIPTTL   = 2 * time.Minute
+	incompletePublicIPTTL = 30 * time.Second
+	nicIPCacheTTL         = 30 * time.Second
 )
 
 type ttlCache[T any] struct {

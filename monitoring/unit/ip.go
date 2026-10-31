@@ -136,7 +136,8 @@ func GetIPAddress() (ipv4, ipv6 string, err error) {
 	if flags.GetIpAddrFromNic {
 		pair := nicIPCache.get(nicIPCacheTTL, lookupNICIP)
 		if pair.v4 != "" || pair.v6 != "" {
-			return pair.v4, pair.v6, nil
+			ipv4, ipv6 = clipToLocalStacks(pair.v4, pair.v6)
+			return ipv4, ipv6, nil
 		}
 	}
 
@@ -157,7 +158,69 @@ func GetIPAddress() (ipv4, ipv6 string, err error) {
 	if ipv6 == "" {
 		ipv6 = cached.v6
 	}
+	ipv4, ipv6 = clipToLocalStacks(ipv4, ipv6)
 	return ipv4, ipv6, nil
+}
+
+func publicIPCacheDuration(pair publicIPPair) time.Duration {
+	if pair.v4 == "" || pair.v6 == "" {
+		return incompletePublicIPTTL
+	}
+	return completePublicIPTTL
+}
+
+func mergePublicIP(prev, next publicIPPair) publicIPPair {
+	if next.v4 != "" {
+		prev.v4 = next.v4
+	}
+	if next.v6 != "" {
+		prev.v6 = next.v6
+	}
+	return prev
+}
+
+func clipToLocalStacks(ipv4, ipv6 string) (string, string) {
+	have4, have6, ok := inspectLocalStacks()
+	if !ok {
+		return ipv4, ipv6
+	}
+	if !have4 && flags.CustomIpv4 == "" {
+		ipv4 = ""
+	}
+	if !have6 && flags.CustomIpv6 == "" {
+		ipv6 = ""
+	}
+	return ipv4, ipv6
+}
+
+func inspectLocalStacks() (v4, v6, ok bool) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false, false, false
+	}
+	v4, v6 = stacksFromLocalAddrs(addrs)
+	return v4, v6, true
+}
+
+func stacksFromLocalAddrs(addrs []net.Addr) (v4, v6 bool) {
+	for _, addr := range addrs {
+		var ip net.IP
+		switch typed := addr.(type) {
+		case *net.IPNet:
+			ip = typed.IP
+		case *net.IPAddr:
+			ip = typed.IP
+		}
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			continue
+		}
+		if ip.To4() != nil {
+			v4 = true
+			continue
+		}
+		v6 = true
+	}
+	return v4, v6
 }
 
 func lookupNICIP() publicIPPair {
@@ -175,23 +238,25 @@ func lookupNICIP() publicIPPair {
 
 func lookupPublicIPCached() publicIPPair {
 	publicIPCache.mu.Lock()
-	if publicIPCache.ok && time.Since(publicIPCache.at) < publicIPCacheTTL && (publicIPCache.val.v4 != "" || publicIPCache.val.v6 != "") {
-		pair := publicIPCache.val
-		publicIPCache.mu.Unlock()
-		return pair
-	}
+	cached := publicIPCache.ok
+	prev := publicIPCache.val
+	at := publicIPCache.at
 	publicIPCache.mu.Unlock()
+	if cached && (prev.v4 != "" || prev.v6 != "") && time.Since(at) < publicIPCacheDuration(prev) {
+		return prev
+	}
 
 	pair := lookupPublicIP()
+	merged := mergePublicIP(prev, pair)
 	if pair.v4 == "" && pair.v6 == "" {
-		return pair
+		return merged
 	}
 	publicIPCache.mu.Lock()
-	publicIPCache.val = pair
+	publicIPCache.val = merged
 	publicIPCache.at = time.Now()
 	publicIPCache.ok = true
 	publicIPCache.mu.Unlock()
-	return pair
+	return merged
 }
 
 func lookupPublicIP() publicIPPair {
