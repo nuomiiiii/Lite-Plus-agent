@@ -195,13 +195,20 @@ func installBootUnit() error {
 	if skipBootUnit() {
 		return nil
 	}
-	if err := os.WriteFile(bootUnitPath, []byte(firewallBootUnit()), 0o644); err != nil {
+	unitChanged, err := writeFileIfChanged(bootUnitPath, firewallBootUnit(), 0o644)
+	if err != nil {
 		return err
 	}
+	dropinChanged := false
 	if err := os.MkdirAll(agentUnitDir, 0o755); err == nil {
-		_ = os.WriteFile(filepath.Join(agentUnitDir, bootAgentDropin), []byte(agentFirewallDropin()), 0o644)
+		changed, werr := writeFileIfChanged(filepath.Join(agentUnitDir, bootAgentDropin), agentFirewallDropin(), 0o644)
+		if werr == nil {
+			dropinChanged = changed
+		}
 	}
-	_, _ = runCmd(cmdTimeout, "systemctl", "daemon-reload")
+	if unitChanged || dropinChanged {
+		_, _ = runCmd(cmdTimeout, "systemctl", "daemon-reload")
+	}
 	if _, err := runCmd(cmdTimeout, "systemctl", "enable", bootUnitName); err != nil {
 		log.Printf("firewall boot unit enable: %v", err)
 		return err

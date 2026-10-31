@@ -84,6 +84,14 @@ func TestNftInetHeadLiveRequiresBaseAllows(t *testing.T) {
 	if !nftInetHeadLive(withAllow, true) {
 		t.Fatal("jump plus marked allows must count as live")
 	}
+	withoutHandles := `chain input {
+	meta nfproto ipv4 tcp dport 45633 accept comment "lite-plus:abc"
+	jump LITE_PLUS
+}
+`
+	if !nftInetHeadLive(withoutHandles, true) {
+		t.Fatal("nftables 1.1.3 omits # handle without -a; marked allows must still count as live")
+	}
 }
 
 func TestNftPlusCommentHandles(t *testing.T) {

@@ -1,6 +1,9 @@
 package firewall
 
-import "path/filepath"
+import (
+	"os"
+	"path/filepath"
+)
 
 const (
 	bootUnitName      = "lite-plus-firewall.service"
@@ -17,4 +20,14 @@ const (
 
 func bootPath(name string) string {
 	return filepath.Join(filepath.Dir(statePath()), name)
+}
+
+func writeFileIfChanged(path, content string, mode os.FileMode) (bool, error) {
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
+		return false, nil
+	}
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		return false, err
+	}
+	return true, nil
 }

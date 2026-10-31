@@ -220,6 +220,12 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(string(attachLinux), "nftQuotedTokens(") {
 		t.Fatal("inet argv insert must quote lite-plus comments so nft does not treat the colon as syntax")
 	}
+	if strings.Contains(string(attachLinux), `"nft", "list", "chain"`) {
+		t.Fatal("listing inet input must use nft -a; nftables 1.1.3 omits handles without -a so allow rules look missing")
+	}
+	if !strings.Contains(string(attachLinux), `nft", "-a", "list", "chain"`) {
+		t.Fatal("live and stale checks must list inet input with handles")
+	}
 	if !strings.Contains(textLinux, `"insert rule "`) {
 		t.Fatal("attach script must insert plus allows into the host input chain so policy drop cannot ignore jumped accepts")
 	}
@@ -265,6 +271,18 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	}
 	if !strings.Contains(bootText, "ownedIptablesRestore(") || !strings.Contains(bootText, "nftTableScript(") || !strings.Contains(bootText, "applyBootScriptLocked(") {
 		t.Fatal("boot persist must apply the same live rules as reboot, not wait for a machine restart")
+	}
+	installFn := bootText[strings.Index(bootText, "func installBootUnit("):]
+	if end := strings.Index(installFn, "\nfunc "); end > 0 {
+		installFn = installFn[:end]
+	}
+	if !strings.Contains(installFn, "writeFileIfChanged(") {
+		t.Fatal("boot unit install must skip daemon-reload when the unit file is unchanged")
+	}
+	reloadAt := strings.Index(installFn, `"systemctl", "daemon-reload"`)
+	changedAt := strings.Index(installFn, "unitChanged || dropinChanged")
+	if reloadAt < 0 || changedAt < 0 || changedAt > reloadAt {
+		t.Fatal("boot unit install must daemon-reload only after a unit or drop-in change")
 	}
 	if !strings.Contains(bootText, "lite-plus:") || !strings.Contains(bootText, `nft delete rule "$fam" "$tab" "$ch" handle`) {
 		t.Fatal("boot must drop previous plus accepts from inet input before reloading")

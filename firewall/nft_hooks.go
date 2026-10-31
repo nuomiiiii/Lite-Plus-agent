@@ -90,10 +90,19 @@ func nftInetHeadLive(listed string, wantAllows bool) bool {
 	if !nftChainJumpsToPlus(listed) {
 		return false
 	}
-	if wantAllows && len(nftPlusCommentHandles(listed)) == 0 {
+	if wantAllows && !nftPlusCommentsLive(listed) {
 		return false
 	}
 	return true
+}
+
+func nftPlusCommentsLive(listed string) bool {
+	for _, line := range strings.Split(listed, "\n") {
+		if strings.Contains(line, plusCommentMark) {
+			return true
+		}
+	}
+	return false
 }
 
 func nftJumpHandles(listed string) []string {

@@ -16,9 +16,13 @@ func liveForeignInetInputHooks() []nftInputHook {
 	return attachableInetHooks(foreignInetInputHooks(out))
 }
 
+func nftListChain(hook nftInputHook) (string, error) {
+	return runCmd(cmdTimeout, "nft", "-a", "list", "chain", hook.Family, hook.Table, hook.Chain)
+}
+
 func detachPlusFromForeignInet() {
 	for _, hook := range liveForeignInetInputHooks() {
-		listed, _ := runCmd(cmdTimeout, "nft", "-a", "list", "chain", hook.Family, hook.Table, hook.Chain)
+		listed, _ := nftListChain(hook)
 		for _, handle := range nftJumpHandles(listed) {
 			_, _ = runCmd(cmdTimeout, "nft", "delete", "rule", hook.Family, hook.Table, hook.Chain, "handle", handle)
 		}
@@ -60,7 +64,7 @@ func attachPlusToForeignInet(intent v2.FirewallIntent, holes []v2.FirewallHole) 
 }
 
 func ensureNftPlusHead(hook nftInputHook, intent v2.FirewallIntent, holes []v2.FirewallHole) error {
-	listed, _ := runCmd(cmdTimeout, "nft", "-a", "list", "chain", hook.Family, hook.Table, hook.Chain)
+	listed, _ := nftListChain(hook)
 	for _, handle := range nftJumpHandles(listed) {
 		_, _ = runCmd(cmdTimeout, "nft", "delete", "rule", hook.Family, hook.Table, hook.Chain, "handle", handle)
 	}
@@ -118,7 +122,7 @@ func nftPlusLive() bool {
 	}
 	wantAllows := nftPersistWantsBaseAllows()
 	for _, hook := range hooks {
-		listed, err := runCmd(cmdTimeout, "nft", "list", "chain", hook.Family, hook.Table, hook.Chain)
+		listed, err := nftListChain(hook)
 		if err != nil || !nftInetHeadLive(listed, wantAllows) {
 			return false
 		}
@@ -142,7 +146,7 @@ func plusRulesStaleLinux() bool {
 	wantAllows := nftPersistWantsBaseAllows()
 	if len(hooks) > 0 {
 		for _, hook := range hooks {
-			listed, err := runCmd(cmdTimeout, "nft", "list", "chain", hook.Family, hook.Table, hook.Chain)
+			listed, err := nftListChain(hook)
 			if err != nil || !nftInetHeadLive(listed, wantAllows) {
 				inetJumpLive = false
 				break
