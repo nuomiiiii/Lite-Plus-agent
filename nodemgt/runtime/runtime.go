@@ -799,10 +799,6 @@ func (r *Runtime) alreadyApplied(opID string) bool {
 	return ok
 }
 
-func (r *Runtime) staleApply(opID string) bool {
-	return r.alreadyApplied(opID)
-}
-
 func (r *Runtime) staleTarget(payload json.RawMessage) bool {
 	fp := targetFingerprint(payload)
 	if fp == "" {

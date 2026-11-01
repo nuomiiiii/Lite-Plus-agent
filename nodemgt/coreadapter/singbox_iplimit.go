@@ -29,6 +29,9 @@ func (t *ipLimitTracker) holdMeta(metadata adapter.InboundContext) (func(), bool
 		return nil, true
 	}
 	userID := t.policy.mapStatName(metadata.User)
+	if userID != "" && t.policy.userBlocked(userID) {
+		return nil, false
+	}
 	if userID == "" {
 		return nil, true
 	}

@@ -32,6 +32,15 @@ func TestGetIPAddressCustomSkipsLookup(t *testing.T) {
 	}
 }
 
+func TestPublicIPCacheSkipsMissingHostStack(t *testing.T) {
+	if publicIPCacheDurationForStacks(publicIPPair{v4: "203.0.113.9"}, true, false) != completePublicIPTTL {
+		t.Fatal("v4-only host must not keep probing v6")
+	}
+	if publicIPCacheDurationForStacks(publicIPPair{v4: "203.0.113.9"}, true, true) != incompletePublicIPTTL {
+		t.Fatal("dual-stack host missing v6 must retry")
+	}
+}
+
 func TestPublicIPCacheRetriesMissingFamilySoon(t *testing.T) {
 	if publicIPCacheDuration(publicIPPair{v4: "203.0.113.9"}) != incompletePublicIPTTL {
 		t.Fatal("v4-only must retry soon so a later v6 is not stuck for hours")

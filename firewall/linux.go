@@ -45,19 +45,27 @@ func detectLinuxBackend() string {
 	return v2.FirewallBackendNone
 }
 
+func watchReady() bool { return privileged() }
+
 func hostOwnsIptablesFilter() bool {
-	nftFilter, _ := runCmd(cmdTimeout, "nft", "list", "table", "ip", "filter")
-	nft6, _ := runCmd(cmdTimeout, "nft", "list", "table", "ip6", "filter")
-	save, _ := runCmd(cmdTimeout, "iptables-save", "-t", "filter")
+	nftFilter, nft6 := "", ""
+	if lookPath("nft") {
+		nftFilter, _ = runCmd(cmdTimeout, "nft", "list", "chain", "ip", "filter", "INPUT")
+		nft6, _ = runCmd(cmdTimeout, "nft", "list", "chain", "ip6", "filter", "INPUT")
+	}
+	save := ""
+	if lookPath("iptables") {
+		save, _ = runCmd(cmdTimeout, "iptables", "-S", "INPUT")
+	}
 	save6 := ""
-	if lookPath("ip6tables-save") {
-		save6, _ = runCmd(cmdTimeout, "ip6tables-save", "-t", "filter")
+	if lookPath("ip6tables") {
+		save6, _ = runCmd(cmdTimeout, "ip6tables", "-S", "INPUT")
 	}
 	return iptablesFilterOwnedByHost(nftFilter+"\n"+nft6, save+"\n"+save6)
 }
 
 func ufwActive() bool {
-	if !lookPath("ufw") {
+	if !lookPath("ufw") || ufwInactiveByConf() {
 		return false
 	}
 	out, err := runCmd(cmdTimeout, "ufw", "status")
@@ -67,12 +75,28 @@ func ufwActive() bool {
 	return strings.Contains(strings.ToLower(out), "status: active")
 }
 
+func ufwInactiveByConf() bool {
+	raw, err := os.ReadFile("/etc/ufw/ufw.conf")
+	if err != nil {
+		return false
+	}
+	return !ufwConfEnabled(string(raw))
+}
+
 func firewalldActive() bool {
-	if !lookPath("firewall-cmd") {
+	if !lookPath("firewall-cmd") || !firewalldRuntimePresent() {
 		return false
 	}
 	out, err := runCmd(cmdTimeout, "firewall-cmd", "--state")
 	return err == nil && strings.Contains(strings.ToLower(out), "running")
+}
+
+func firewalldRuntimePresent() bool {
+	if _, err := os.Stat("/run/firewalld/firewalld.pid"); err == nil {
+		return true
+	}
+	info, err := os.Stat("/run/firewalld")
+	return err == nil && info.IsDir()
 }
 
 func privileged() bool {
@@ -177,11 +201,22 @@ func deleteInetPlusTable() {
 }
 
 func iptablesPlusInputLive(bin string) bool {
-	if _, err := runCmd(cmdTimeout, bin, "-n", "-L", iptablesChain); err != nil {
+	input, err := runCmd(cmdTimeout, bin, "-S", "INPUT")
+	if err != nil || !iptablesInputJumpsToPlus(input) {
 		return false
 	}
-	out, err := runCmd(cmdTimeout, bin, "-S", "INPUT")
-	return err == nil && iptablesInputJumpsToPlus(out)
+	return iptablesPlusChainMarked(bin)
+}
+
+func iptablesPlusChainMarked(bin string) bool {
+	out, err := runCmd(cmdTimeout, bin, "-S", iptablesChain)
+	if err != nil {
+		return false
+	}
+	if nftPersistWantsBaseAllows() && !strings.Contains(out, plusCommentMark) {
+		return false
+	}
+	return true
 }
 
 func iptablesPlusLive() bool {

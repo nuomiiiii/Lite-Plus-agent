@@ -14,6 +14,14 @@ func TestInboundSpecsEqualIgnoresTLSPointer(t *testing.T) {
 	}
 }
 
+func TestUserAuthEqualDetectsUsernameChange(t *testing.T) {
+	a := []UserSpec{{ID: "u1", UUID: "alice", Username: "sms", Password: "pw"}}
+	b := []UserSpec{{ID: "u1", UUID: "alice", Username: "node", Password: "pw"}}
+	if userAuthEqual(a, b) {
+		t.Fatal("http username change must restart the inbound account")
+	}
+}
+
 func TestUserAuthEqualIgnoresQuotaAndRate(t *testing.T) {
 	a := []UserSpec{{ID: "u1", UUID: "alice", Password: "pw", QuotaBytes: 10, RateLimitBps: 1, DeviceLimit: 2}}
 	b := []UserSpec{{ID: "u1", UUID: "alice", Password: "pw", QuotaBytes: 99, RateLimitBps: 8, DeviceLimit: 0}}

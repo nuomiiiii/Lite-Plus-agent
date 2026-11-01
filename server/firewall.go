@@ -67,10 +67,5 @@ func withRequest(result v2.FirewallResultParams, requestID, kind string) v2.Fire
 
 func reportFirewallResult(conn *ws.SafeConn, result v2.FirewallResultParams) {
 	payload := v2.Request{JSONRPC: v2.Version, Method: v2.MethodAgentFirewallResult, Params: result}
-	if conn != nil && conn.WriteJSON(payload) == nil {
-		return
-	}
-	if err := postV2RPC(payload); err != nil {
-		log.Printf("failed to upload firewall result: %v", err)
-	}
+	reportV2Result(conn, payload, "failed to upload firewall result")
 }

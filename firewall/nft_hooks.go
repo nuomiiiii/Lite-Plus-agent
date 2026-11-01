@@ -51,6 +51,29 @@ func parseNftTableHeader(line string) (family, name string) {
 	return fields[1], strings.TrimSuffix(fields[2], "{")
 }
 
+func parseNftListedTables(raw string) []nftInputHook {
+	var out []nftInputHook
+	for _, line := range strings.Split(raw, "\n") {
+		fam, table := parseNftTableHeader(strings.TrimSpace(line))
+		if fam == "" || table == "" {
+			continue
+		}
+		out = append(out, nftInputHook{Family: fam, Table: table})
+	}
+	return out
+}
+
+func inetTablesForWatch(tables []nftInputHook) []nftInputHook {
+	var out []nftInputHook
+	for _, table := range tables {
+		if table.Family != "inet" || table.Table == plusNftTable || skipManagedInetTable(table.Table) {
+			continue
+		}
+		out = append(out, table)
+	}
+	return out
+}
+
 func foreignInetInputHooks(raw string) []nftInputHook {
 	var out []nftInputHook
 	for _, hook := range parseNftInputHooks(raw) {
@@ -111,6 +134,20 @@ func nftPlusCommentsLive(listed string) bool {
 		}
 	}
 	return false
+}
+
+func nftTableLooksPresent(out string) bool {
+	return strings.Contains(out, "chain")
+}
+
+func nftTableLooksLive(out string, wantMarks bool) bool {
+	if !nftTableLooksPresent(out) {
+		return false
+	}
+	if wantMarks && !strings.Contains(out, plusCommentMark) {
+		return false
+	}
+	return true
 }
 
 func nftJumpHandles(listed string) []string {

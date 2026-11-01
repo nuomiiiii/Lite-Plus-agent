@@ -2,9 +2,11 @@
 
 package firewall
 
-import "strings"
+func listPlusInetTable() (string, error) {
+	return runCmd(cmdTimeout, "nft", "list", "table", "inet", nftTable)
+}
 
 func leftoverInetPlusTable() bool {
-	out, err := runCmd(cmdTimeout, "nft", "list", "table", "inet", nftTable)
-	return err == nil && strings.Contains(out, "chain")
+	out, err := listPlusInetTable()
+	return err == nil && nftTableLooksPresent(out)
 }

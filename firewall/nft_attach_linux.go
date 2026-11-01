@@ -9,11 +9,19 @@ import (
 )
 
 func liveForeignInetInputHooks() []nftInputHook {
-	out, err := runCmd(dumpTimeout, "nft", "list", "ruleset")
+	listed, err := runCmd(cmdTimeout, "nft", "list", "tables")
 	if err != nil {
 		return nil
 	}
-	return attachableInetHooks(foreignInetInputHooks(out))
+	var hooks []nftInputHook
+	for _, table := range inetTablesForWatch(parseNftListedTables(listed)) {
+		out, err := runCmd(cmdTimeout, "nft", "list", "table", table.Family, table.Table)
+		if err != nil {
+			continue
+		}
+		hooks = append(hooks, attachableInetHooks(foreignInetInputHooks(out))...)
+	}
+	return hooks
 }
 
 func nftListChain(hook nftInputHook) (string, error) {
@@ -107,13 +115,17 @@ func nftBaseAllowTokens(intent v2.FirewallIntent, holes []v2.FirewallHole) [][]s
 	return out
 }
 
-func nftPlusLive() bool {
-	hooks := liveForeignInetInputHooks()
-	if len(hooks) == 0 {
-		return leftoverInetPlusTable()
-	}
-	if leftoverInetPlusTable() {
+func nftPersistWantsBaseAllows() bool {
+	state := loadPersist()
+	if state == nil {
 		return false
+	}
+	return len(nftBaseAllowTokens(state.Intent, state.ListenHoles)) > 0
+}
+
+func inetPlusJumpLive(hooks []nftInputHook) bool {
+	if len(hooks) == 0 {
+		return true
 	}
 	wantAllows := nftPersistWantsBaseAllows()
 	for _, hook := range hooks {
@@ -127,38 +139,4 @@ func nftPlusLive() bool {
 		}
 	}
 	return true
-}
-
-func nftPersistWantsBaseAllows() bool {
-	state := loadPersist()
-	if state == nil {
-		return false
-	}
-	return len(nftBaseAllowTokens(state.Intent, state.ListenHoles)) > 0
-}
-
-func plusRulesStaleLinux() bool {
-	kind := detectLinuxBackend()
-	leftover := leftoverInetPlusTable()
-	hooks := liveForeignInetInputHooks()
-	inetJumpLive := true
-	wantAllows := nftPersistWantsBaseAllows()
-	if len(hooks) > 0 {
-		for _, hook := range hooks {
-			hostListed, err := nftListChain(hook)
-			if err != nil {
-				inetJumpLive = false
-				break
-			}
-			plusListed, err := nftListPlusChain(hook)
-			if err != nil || !nftAttachLive(hostListed, plusListed, wantAllows) {
-				inetJumpLive = false
-				break
-			}
-		}
-	}
-	if kind == v2.FirewallBackendUFW {
-		return plusRulesStaleDecision(kind, leftover, false, false, len(hooks) > 0, inetJumpLive)
-	}
-	return plusRulesStaleDecision(kind, leftover, hostOwnsIptablesFilter(), iptablesPlusLive(), len(hooks) > 0, inetJumpLive)
 }

@@ -741,10 +741,6 @@ func egressChain(tag string, specs []OutboundSpec, seen map[string]bool) ([]egre
 	return append(hops, hop), true
 }
 
-func policyViaTag(userID, outbound string) string {
-	return "nodemgt-via-" + userID + "-" + outbound
-}
-
 func cloneAnyMap(m map[string]any) map[string]any {
 	if m == nil {
 		return nil
@@ -893,44 +889,6 @@ func outboundIsBlock(ob map[string]any, tag string) bool {
 	default:
 		return false
 	}
-}
-
-func viaOutbound(base map[string]any, tag, proxy string, xray bool) map[string]any {
-	ob := cloneAnyMap(base)
-	if ob == nil {
-		if xray {
-			ob = map[string]any{
-				"protocol": "freedom",
-				"settings": map[string]any{"finalRules": []map[string]any{{"action": "allow"}}},
-			}
-		} else {
-			ob = map[string]any{"type": "direct"}
-		}
-	}
-	ob["tag"] = tag
-	kind, _ := ob["protocol"].(string)
-	if kind == "" {
-		kind, _ = ob["type"].(string)
-	}
-	if strings.EqualFold(kind, "blackhole") || strings.EqualFold(kind, "block") {
-		return ob
-	}
-	if xray {
-		stream, _ := ob["streamSettings"].(map[string]any)
-		if stream == nil {
-			stream = map[string]any{}
-		}
-		sockopt, _ := stream["sockopt"].(map[string]any)
-		if sockopt == nil {
-			sockopt = map[string]any{}
-		}
-		sockopt["dialerProxy"] = proxy
-		stream["sockopt"] = sockopt
-		ob["streamSettings"] = stream
-		return ob
-	}
-	ob["detour"] = proxy
-	return ob
 }
 
 func attachPolicyExit(obs, rules []map[string]any, users []UserSpec, policyTags []string, xray bool, specs []OutboundSpec) ([]map[string]any, []map[string]any, []frontSpec, []map[string]any, error) {
@@ -1222,6 +1180,15 @@ func inboundsNeedCoreRestart(inbounds []InboundSpec, users []UserSpec) bool {
 			continue
 		}
 		return true
+	}
+	return false
+}
+
+func coreOwnedTLSInbounds(inbounds []InboundSpec, users []UserSpec) bool {
+	for _, in := range inbounds {
+		if coreOwnedTLS(in, users) {
+			return true
+		}
 	}
 	return false
 }

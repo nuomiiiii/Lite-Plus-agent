@@ -2,10 +2,6 @@ package firewall
 
 import v2 "github.com/nuomiiiii/lite-agent/protocol/v2"
 
-func plusRulesStale() bool {
-	return plusRulesStaleLinux()
-}
-
 // plusRulesStaleDecision reports that Plus is on the wrong hook and must be
 // re-applied. ufw never uses the LITE_PLUS INPUT jump: its own chains always
 // look like a foreign INPUT, so treating that as stale would delete and rewrite

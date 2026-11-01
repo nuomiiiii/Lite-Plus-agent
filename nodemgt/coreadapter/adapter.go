@@ -127,10 +127,6 @@ func markDenied(users []UserSpec, userID string) []UserSpec {
 	return out
 }
 
-func inboundAuthEmpty(granted []UserSpec) bool {
-	return len(granted) == 0
-}
-
 func inboundAccountID(proto, inboundID, user string) string {
 	switch strings.ToLower(strings.TrimSpace(proto)) {
 	case "socks", "mixed":

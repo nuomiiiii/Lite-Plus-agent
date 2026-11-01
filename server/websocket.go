@@ -547,8 +547,9 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 		if nodemgtrt := nodemgtRuntimeHandle(); nodemgtrt != nil {
 			return nodemgtrt(params, eventID)
 		}
+		forgetV2Event(eventID)
 		log.Printf("nodemgt.control received before runtime start")
-		return true
+		return false
 	case v2.MethodAgentFirewallSnapshot, v2.MethodAgentFirewallApply, v2.MethodAgentFirewallAdopt, v2.MethodAgentFirewallInstall:
 		return processFirewallEvent(conn, method, params)
 	case v2.MethodAgentMessage, v2.MethodAgentEvent:

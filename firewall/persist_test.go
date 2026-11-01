@@ -72,6 +72,9 @@ func TestPersistStateRoundTrip(t *testing.T) {
 	if got == nil || !got.Intent.BlockPing4 || !got.Intent.BlockPing6 || got.Intent.SshPort != "2222" || got.UfwIncoming != "" || got.WindowsPolicy != "blockinbound,allowoutbound" {
 		t.Fatalf("%+v", got)
 	}
+	if got.AppliedBackend == "" {
+		t.Fatal("persist must remember the backend watch should reuse")
+	}
 	if len(got.ListenHoles) != 1 || got.ListenHoles[0].Port != "443" {
 		t.Fatalf("holes %+v", got.ListenHoles)
 	}

@@ -50,16 +50,15 @@ func ensureOwned() error {
 	if state == nil || intentIdle(state.Intent) {
 		return nil
 	}
-	eng := currentBackend()
-	snap := eng.snapshot()
-	if !snap.Supported || !snap.Privileged {
+	if !watchReady() {
 		return nil
 	}
-	if plusRulesStale() {
+	stale, live := probeOwnedWatch()
+	if stale {
 		log.Printf("firewall plus table is on the wrong hook; moving allow ports onto the host INPUT")
 		return restorePersistedLocked()
 	}
-	if engOwned(eng) {
+	if live {
 		return nil
 	}
 	log.Printf("firewall owned rules missing; restoring all plus allow ports")

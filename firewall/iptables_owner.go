@@ -28,11 +28,14 @@ func iptablesInputHasForeignRules(save string) bool {
 }
 
 func inputPolicyDrop(line string) bool {
-	if !strings.HasPrefix(line, ":INPUT ") {
-		return false
-	}
 	fields := strings.Fields(line)
-	return len(fields) >= 2 && strings.EqualFold(fields[1], "DROP")
+	if strings.HasPrefix(line, ":INPUT ") {
+		return len(fields) >= 2 && strings.EqualFold(fields[1], "DROP")
+	}
+	if strings.HasPrefix(line, "-P INPUT ") {
+		return len(fields) >= 3 && strings.EqualFold(fields[2], "DROP")
+	}
+	return false
 }
 
 func iptablesInputJumpIsPlus(line string) bool {

@@ -127,10 +127,6 @@ func sleepCtx(ctx context.Context, delay time.Duration) bool {
 	}
 }
 
-func recoverInterruptedTasks(store *tasklog.Log) {
-	recoverPendingReportsWith(context.Background(), store, uploadTaskResult)
-}
-
 func recoverInterruptedTasksWith(store *tasklog.Log, upload taskResultUploader) {
 	recoverPendingReportsWith(context.Background(), store, upload)
 }
@@ -634,16 +630,17 @@ func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 	}
 	finishedAt := time.Now()
 	wsPayload := v2.BuildPingResultPayload(taskID, pingType, pingResult, finishedAt)
-	if conn == nil {
-		if err := postV2RPC(wsPayload); err != nil {
-			log.Printf("Failed to upload ping result over POST: %v", err)
-		}
+	reportV2Result(conn, wsPayload, "Failed to upload ping result")
+
+}
+
+func reportV2Result(conn *ws.SafeConn, payload interface{}, failLog string) {
+	if conn != nil && conn.WriteJSON(payload) == nil {
 		return
 	}
-	if err := conn.WriteJSON(wsPayload); err != nil {
-		log.Printf("Failed to write JSON to WebSocket: %v", err)
+	if err := postV2RPC(payload); err != nil {
+		log.Printf("%s: %v", failLog, err)
 	}
-
 }
 
 func postV2RPC(payload interface{}) error {

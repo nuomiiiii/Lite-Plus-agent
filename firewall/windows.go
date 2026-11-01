@@ -16,6 +16,10 @@ type windowsBackend struct{}
 
 func currentBackend() backend { return windowsBackend{} }
 
+func watchReady() bool { return true }
+
+func plusWatchLive() bool { return engOwned(currentBackend()) }
+
 func (windowsBackend) name() string { return v2.FirewallBackendWindows }
 
 func (windowsBackend) snapshot() v2.FirewallResultParams {

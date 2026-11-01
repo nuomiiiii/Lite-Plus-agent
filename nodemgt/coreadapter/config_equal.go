@@ -49,7 +49,7 @@ func userAuthKey(u UserSpec) string {
 	ids := append([]string(nil), u.InboundIDs...)
 	sort.Strings(ids)
 	return strings.Join([]string{
-		u.ID, u.UUID, u.Password, u.Flow,
+		u.ID, u.UUID, u.Username, u.Password, u.Flow,
 		strconv.FormatBool(u.Disabled), strconv.FormatBool(u.Expired),
 		strconv.FormatBool(quotaExhausted(u)),
 		strings.Join(ids, ","),

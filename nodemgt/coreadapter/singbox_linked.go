@@ -112,6 +112,12 @@ func (c *singBoxCore) CloseUserSessions(userID string) error {
 		check = c.lastIn
 	}
 	if !inboundsNeedCoreRestart(check, c.users) {
+		if c.inst != nil && coreOwnedTLSInbounds(check, c.users) {
+			if len(c.inbounds) == 0 && len(c.lastIn) > 0 {
+				c.inbounds = append([]InboundSpec(nil), c.lastIn...)
+			}
+			return c.restartLocked()
+		}
 		return nil
 	}
 	if len(c.inbounds) == 0 && len(c.lastIn) > 0 {
@@ -661,7 +667,14 @@ func singBoxProxyOutbound(row OutboundSpec, tag string, tags map[string]string) 
 				}
 			}
 		}
-	case "trojan", "anytls":
+	case "trojan", "anytls", "hysteria2":
+		if pass, _ := settings["password"].(string); pass != "" {
+			item["password"] = pass
+		}
+	case "tuic":
+		if uuid, _ := settings["uuid"].(string); uuid != "" {
+			item["uuid"] = uuid
+		}
 		if pass, _ := settings["password"].(string); pass != "" {
 			item["password"] = pass
 		}
@@ -680,8 +693,10 @@ func singBoxProxyOutbound(row OutboundSpec, tag string, tags map[string]string) 
 			item["detour"] = via
 		}
 	}
-	if transport := singBoxOutboundTransport(settings); transport != nil {
-		item["transport"] = transport
+	if proto != "hysteria2" && proto != "tuic" {
+		if transport := singBoxOutboundTransport(settings); transport != nil {
+			item["transport"] = transport
+		}
 	}
 	if tls := singBoxOutboundTLS(settings); tls != nil {
 		item["tls"] = tls

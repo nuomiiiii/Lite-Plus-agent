@@ -42,15 +42,7 @@ func NewRouteTask(conn *ws.SafeConn, task v2.RouteParams) {
 		log.Printf("Return route task %d failed: %v", task.TaskID, err)
 	}
 	payload := v2.BuildRouteResultPayload(task, hops, errText, finishedAt, routeResolvedTarget(task.Target, task.IPVersion, hops), routeTargetReached(hops, task.Target, task.IPVersion))
-	if conn == nil {
-		if err := postV2RPC(payload); err != nil {
-			log.Printf("Failed to upload return route result over POST: %v", err)
-		}
-		return
-	}
-	if err := conn.WriteJSON(payload); err != nil {
-		log.Printf("Failed to upload return route result: %v", err)
-	}
+	reportV2Result(conn, payload, "Failed to upload return route result")
 }
 
 func runRouteProbe(target string, version, maxHops int) (hops []v2.RouteHop, err error) {

@@ -44,7 +44,9 @@ var (
 		},
 		Timeout: 15 * time.Second,
 	}
-	userAgent = "curl/8.0.1"
+	userAgent   = "curl/8.0.1"
+	ipv4Pattern = regexp.MustCompile(`\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`)
+	ipv6Pattern = regexp.MustCompile(`(([0-9A-Fa-f]{1,4}:){7})([0-9A-Fa-f]{1,4})|(([0-9A-Fa-f]{1,4}:){1,6}:)(([0-9A-Fa-f]{1,4}:){0,4})([0-9A-Fa-f]{0,4})`)
 )
 
 func GetIPv4Address() (string, error) {
@@ -75,8 +77,7 @@ func GetIPv4Address() (string, error) {
 		if err != nil {
 			continue
 		}
-		re := regexp.MustCompile(`\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`)
-		ipv4 := re.FindString(string(body))
+		ipv4 := ipv4Pattern.FindString(string(body))
 		if ipv4 != "" {
 			log.Printf("Get IPV4 Success: %s", ipv4)
 			return ipv4, nil
@@ -111,9 +112,7 @@ func GetIPv6Address() (string, error) {
 			continue
 		}
 
-		// 使用正则表达式从响应体中提取IPv6地址
-		re := regexp.MustCompile(`(([0-9A-Fa-f]{1,4}:){7})([0-9A-Fa-f]{1,4})|(([0-9A-Fa-f]{1,4}:){1,6}:)(([0-9A-Fa-f]{1,4}:){0,4})([0-9A-Fa-f]{0,4})`)
-		ipv6 := re.FindString(string(body))
+		ipv6 := ipv6Pattern.FindString(string(body))
 		if ipv6 != "" {
 			log.Printf("Get IPV6 Success:  %s", ipv6)
 			return ipv6, nil
@@ -242,7 +241,7 @@ func lookupPublicIPCached() publicIPPair {
 	prev := publicIPCache.val
 	at := publicIPCache.at
 	publicIPCache.mu.Unlock()
-	if cached && (prev.v4 != "" || prev.v6 != "") && time.Since(at) < publicIPCacheDuration(prev) {
+	if cached && (prev.v4 != "" || prev.v6 != "") && time.Since(at) < livePublicIPCacheDuration(prev) {
 		return prev
 	}
 
@@ -260,16 +259,20 @@ func lookupPublicIPCached() publicIPPair {
 }
 
 func lookupPublicIP() publicIPPair {
+	have4, have6, ok := inspectLocalStacks()
+	if !ok {
+		have4, have6 = true, true
+	}
 	var pair publicIPPair
 	var err error
-	if flags.CustomIpv4 == "" {
+	if flags.CustomIpv4 == "" && have4 {
 		pair.v4, err = GetIPv4Address()
 		if err != nil {
 			log.Printf("Get IPV4 Error: %v", err)
 			pair.v4 = ""
 		}
 	}
-	if flags.CustomIpv6 == "" {
+	if flags.CustomIpv6 == "" && have6 {
 		pair.v6, err = GetIPv6Address()
 		if err != nil {
 			log.Printf("Get IPV6 Error: %v", err)
@@ -277,6 +280,21 @@ func lookupPublicIP() publicIPPair {
 		}
 	}
 	return pair
+}
+
+func livePublicIPCacheDuration(pair publicIPPair) time.Duration {
+	have4, have6, ok := inspectLocalStacks()
+	if !ok {
+		return publicIPCacheDuration(pair)
+	}
+	return publicIPCacheDurationForStacks(pair, have4, have6)
+}
+
+func publicIPCacheDurationForStacks(pair publicIPPair, have4, have6 bool) time.Duration {
+	if (have4 && pair.v4 == "") || (have6 && pair.v6 == "") {
+		return incompletePublicIPTTL
+	}
+	return completePublicIPTTL
 }
 
 // getIPFromInterfaces 从指定的网卡接口获取 IPv4 和 IPv6 地址

@@ -55,17 +55,12 @@ func (sc *SafeConn) ReadMessage() (int, []byte, error) {
 	return sc.conn.ReadMessage()
 }
 
-func (sc *SafeConn) ReadJSON(v interface{}) error {
-	return sc.conn.ReadJSON(v)
-}
-
 func (sc *SafeConn) SetReadDeadline(t time.Time) error {
 	return sc.conn.SetReadDeadline(t)
 }
 
 // SetPongHandler installs the handler on the underlying connection without
-// taking the write lock. Do not use GetConn() for this: that lock can race
-// with WriteMessage.
+// taking the write lock.
 func (sc *SafeConn) SetPongHandler(h func(appData string) error) {
 	if sc == nil || sc.conn == nil {
 		return
@@ -84,10 +79,4 @@ func (sc *SafeConn) AttachReadKeepalive(wait time.Duration) error {
 		return sc.conn.SetReadDeadline(time.Now().Add(wait))
 	})
 	return nil
-}
-
-func (sc *SafeConn) GetConn() *websocket.Conn {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-	return sc.conn
 }

@@ -63,6 +63,19 @@ func TestPlusRulesStaleDecision(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "firewalld nft backend without iptables jump is not stale",
+			kind: v2.FirewallBackendFirewalld,
+			want: false,
+		},
+		{
+			name: "firewalld leftover plus table is stale",
+			kind: v2.FirewallBackendFirewalld,
+			leftoverPlus: true,
+			hostOwns: true,
+			iptablesLive: true,
+			want: true,
+		},
+		{
 			name: "nft inet input without plus jump is stale",
 			kind: v2.FirewallBackendNFT,
 			hasInetHooks: true,

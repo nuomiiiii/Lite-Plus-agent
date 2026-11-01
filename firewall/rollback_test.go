@@ -33,6 +33,9 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(applyFn, "unifyPairedPolicy(&intent)") {
 		t.Fatal("apply must persist the ping/deny switch onto both stacks")
 	}
+	if !strings.Contains(applyFn, "persistApplied(") || !strings.Contains(applyFn, "eng.name()") {
+		t.Fatal("apply must persist the backend that was just applied, not re-detect it")
+	}
 	adopt := text[strings.Index(text, "func Adopt("):]
 	if end := strings.Index(adopt, "\nfunc "); end > 0 {
 		adopt = adopt[:end]
@@ -115,6 +118,12 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(restoreFn, "mergeHoles(") || !strings.Contains(restoreFn, "eng.apply(") || !strings.Contains(restoreFn, "state.Intent") {
 		t.Fatal("restore on upgrade must re-apply persisted plus rules through the current backend")
 	}
+	if !strings.Contains(restoreFn, "persistApplied(") || !strings.Contains(restoreFn, "eng.name()") {
+		t.Fatal("restore must persist the backend it just applied")
+	}
+	if strings.Contains(restoreFn, "snapshot()") {
+		t.Fatal("restore must not dump a full firewall snapshot")
+	}
 	keepLinux, err := os.ReadFile("keep_linux.go")
 	if err != nil {
 		t.Fatal(err)
@@ -126,8 +135,27 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(watch), "engOwned(") || !strings.Contains(string(watch), "restorePersistedLocked()") || !strings.Contains(string(watch), "plusRulesStale(") || !strings.Contains(string(watch), "stacksChangedSincePersist(") || !strings.Contains(string(watch), "stackWatchEvery") || !strings.Contains(string(watch), "ensureStacks(") {
+	if !strings.Contains(string(watch), "probeOwnedWatch(") || !strings.Contains(string(watch), "restorePersistedLocked()") || !strings.Contains(string(watch), "stacksChangedSincePersist(") || !strings.Contains(string(watch), "stackWatchEvery") || !strings.Contains(string(watch), "ensureStacks(") {
 		t.Fatal("watch must restore after a host flush, stack change, and leftover inet table")
+	}
+	if strings.Contains(string(watch), "snapshot()") {
+		t.Fatal("watch must only check whether plus rules are still present, not dump a full firewall snapshot")
+	}
+	if strings.Contains(string(watch), "currentBackend()") {
+		t.Fatal("watch must not re-detect the host backend on every tick")
+	}
+	if !strings.Contains(string(watch), "watchReady(") {
+		t.Fatal("watch must skip the host-rule dump when the agent cannot change the firewall")
+	}
+	hostOwnsFn := textLinux[strings.Index(textLinux, "func hostOwnsIptablesFilter("):]
+	if end := strings.Index(hostOwnsFn, "\nfunc "); end > 0 {
+		hostOwnsFn = hostOwnsFn[:end]
+	}
+	if strings.Contains(hostOwnsFn, "iptables-save") || strings.Contains(hostOwnsFn, "ip6tables-save") {
+		t.Fatal("host INPUT watch must not dump the whole filter table")
+	}
+	if !strings.Contains(hostOwnsFn, `"iptables", "-S", "INPUT"`) || !strings.Contains(hostOwnsFn, `"nft", "list", "chain"`) {
+		t.Fatal("host INPUT watch must list only the INPUT chain")
 	}
 	stale, err := os.ReadFile("plus_stale.go")
 	if err != nil {
@@ -136,15 +164,18 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(string(stale), "plusRulesStaleDecision(") || !strings.Contains(string(stale), "FirewallBackendUFW") {
 		t.Fatal("ufw hosts must not treat the native INPUT chain as a missing plus jump")
 	}
+	if strings.Contains(string(stale), "func plusRulesStale(") {
+		t.Fatal("plusRulesStale was a dead wrapper; linux watch uses probeOwnedWatch")
+	}
 	ownedLinux, err := os.ReadFile("owned_linux.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(ownedLinux), "iptablesPlusLive(") {
-		t.Fatal("iptables owned check must require the INPUT jump, not only a leftover chain")
-	}
 	if !strings.Contains(string(ownedLinux), `"--get-chains", "ipv6", "filter"`) {
 		t.Fatal("firewalld owned check must cover the ipv6 plus chain, not only ipv4")
+	}
+	if !strings.Contains(string(ownedLinux), "firewalldDirectLive(") || !strings.Contains(string(ownedLinux), "plusCommentMark") {
+		t.Fatal("firewalld live check must restore when the plus chain exists but its marked allows were flushed")
 	}
 	if !strings.Contains(textLinux, "iptablesPlusLive(") || !strings.Contains(textLinux, `iptablesPlusInputLive("ip6tables")`) {
 		t.Fatal("iptables live check must cover ipv6 INPUT jump as well as ipv4")
@@ -213,6 +244,104 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	attachLinux, err := os.ReadFile("nft_attach_linux.go")
 	if err != nil {
 		t.Fatal(err)
+	}
+	attachLive := string(attachLinux)
+	liveHooksFn := attachLive[strings.Index(attachLive, "func liveForeignInetInputHooks("):]
+	if end := strings.Index(liveHooksFn, "\nfunc "); end > 0 {
+		liveHooksFn = liveHooksFn[:end]
+	}
+	if strings.Contains(liveHooksFn, `"nft", "list", "ruleset"`) || strings.Contains(liveHooksFn, "dumpTimeout") {
+		t.Fatal("inet hook watch must not dump the whole nft ruleset")
+	}
+	if !strings.Contains(liveHooksFn, `"nft", "list", "tables"`) || !strings.Contains(liveHooksFn, "inetTablesForWatch(") {
+		t.Fatal("inet hook watch must list tables, then only inet tables")
+	}
+	watchLinux, err := os.ReadFile("watch_linux.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	watchLinuxText := string(watchLinux)
+	probeFn := watchLinuxText[strings.Index(watchLinuxText, "func probeOwnedWatch("):]
+	if end := strings.Index(probeFn, "\nfunc "); end > 0 {
+		probeFn = probeFn[:end]
+	}
+	if strings.Contains(probeFn, "hostOwnsIptablesFilter(") || strings.Contains(probeFn, "iptables-save") || strings.Contains(probeFn, "list\", \"ruleset\"") {
+		t.Fatal("watch probe must not dump the whole host filter table")
+	}
+	if strings.Contains(probeFn, "nftOwnedTableLive(") || strings.Contains(probeFn, "leftoverInetPlusTable(") {
+		t.Fatal("watch must list inet liteplus once and reuse that dump for leftover and live")
+	}
+	if !strings.Contains(probeFn, "listPlusInetTable(") || !strings.Contains(probeFn, "nftTableLooksLive(") {
+		t.Fatal("owned nft live check must look at plus marks from the leftover dump")
+	}
+	if strings.Contains(probeFn, "firewalldPlusLive(") {
+		t.Fatal("firewalld watch must not re-run iptablesPlusLive after the shared live result")
+	}
+	if !strings.Contains(probeFn, "firewalldDirectLive(") {
+		t.Fatal("firewalld watch must check direct chains after the shared iptables live result")
+	}
+	if !strings.Contains(probeFn, "persistedBackend()") || !strings.Contains(probeFn, "prev != kind") {
+		t.Fatal("watch must reapply when ufw or firewalld is turned on or off, even if old plus marks are still on disk")
+	}
+	if !strings.Contains(watchLinuxText, "watchBackendKind(") || !strings.Contains(watchLinuxText, "AppliedBackend") {
+		t.Fatal("watch must reuse the backend chosen at apply, not re-detect it every tick")
+	}
+	kindFn := watchLinuxText[strings.Index(watchLinuxText, "func watchBackendKind("):]
+	if end := strings.Index(kindFn, "\nfunc "); end > 0 {
+		kindFn = kindFn[:end]
+	}
+	if !strings.Contains(kindFn, "ufwActive(") || !strings.Contains(kindFn, "ufwInactiveByConf(") {
+		t.Fatal("watch must follow ufw being turned on or off")
+	}
+	if !strings.Contains(kindFn, "firewalldActive(") || !strings.Contains(kindFn, "firewalldRuntimePresent(") {
+		t.Fatal("watch must follow firewalld being turned on or off")
+	}
+	watchOwnsFn := watchLinuxText[strings.Index(watchLinuxText, "func watchHostOwns("):]
+	if end := strings.Index(watchOwnsFn, "\nfunc "); end > 0 {
+		watchOwnsFn = watchOwnsFn[:end]
+	}
+	if !strings.Contains(watchOwnsFn, "hostOwnsIptablesFilter(") {
+		t.Fatal("nft leftover watch must inspect INPUT the same way apply detects 1Panel/宝塔")
+	}
+	if !strings.Contains(watchOwnsFn, "FirewallBackendFirewalld") || !strings.Contains(watchOwnsFn, "return leftover") {
+		t.Fatal("firewalld watch must not treat a missing iptables jump as stale on nft-backend firewalld")
+	}
+	if !strings.Contains(watchLinuxText, "ufwPlusLive(") || !strings.Contains(watchLinuxText, "ufwUserRules") {
+		t.Fatal("ufw watch must read user.rules instead of forking ufw status every tick")
+	}
+	ufwActiveFn := textLinux[strings.Index(textLinux, "func ufwActive("):]
+	if end := strings.Index(ufwActiveFn, "\nfunc "); end > 0 {
+		ufwActiveFn = ufwActiveFn[:end]
+	}
+	if !strings.Contains(ufwActiveFn, "ufwInactiveByConf(") {
+		t.Fatal("inactive ufw must not fork the python ufw status helper")
+	}
+	fwActiveFn := textLinux[strings.Index(textLinux, "func firewalldActive("):]
+	if end := strings.Index(fwActiveFn, "\nfunc "); end > 0 {
+		fwActiveFn = fwActiveFn[:end]
+	}
+	if !strings.Contains(fwActiveFn, "firewalldRuntimePresent(") {
+		t.Fatal("stopped firewalld must not call firewall-cmd --state every watch tick")
+	}
+	liveFn := textLinux[strings.Index(textLinux, "func iptablesPlusInputLive("):]
+	if end := strings.Index(liveFn, "\nfunc iptablesPlusLive("); end > 0 {
+		liveFn = liveFn[:end]
+	}
+	if strings.Contains(liveFn, `"-n", "-L"`) {
+		t.Fatal("iptables live watch must not list the whole plus chain with -L")
+	}
+	if !strings.Contains(liveFn, `"-S", "INPUT"`) || !strings.Contains(liveFn, `"-S", iptablesChain`) {
+		t.Fatal("iptables live watch must check the INPUT jump and plus marks on LITE_PLUS")
+	}
+	staleLinux, err := os.ReadFile("plus_stale_linux.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(staleLinux), "listPlusInetTable(") || !strings.Contains(watchLinuxText, "nftTableLooksLive(") {
+		t.Fatal("owned nft live check must look at plus marks, not only whether the table still exists")
+	}
+	if strings.Contains(string(attachLinux), "plusRulesStaleLinux") {
+		t.Fatal("linux watch must not run a second full probe via plusRulesStaleLinux")
 	}
 	if !strings.Contains(string(attachLinux), "ensureNftPlusHead(") || !strings.Contains(string(attachLinux), "nftListPlusChain(") {
 		t.Fatal("inet attach must jump into LITE_PLUS and list that chain for live allows")

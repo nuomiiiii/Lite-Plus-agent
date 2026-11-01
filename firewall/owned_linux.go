@@ -8,30 +8,30 @@ import (
 	v2 "github.com/nuomiiiii/lite-agent/protocol/v2"
 )
 
-func engOwned(eng backend) bool {
-	switch eng.name() {
-	case v2.FirewallBackendNFT:
-		return nftPlusLive()
-	case v2.FirewallBackendIptables:
-		return iptablesPlusLive()
-	case v2.FirewallBackendUFW:
-		out, err := runCmd(cmdTimeout, "ufw", "status", "numbered")
-		return err == nil && strings.Contains(out, "lite-plus:")
-	case v2.FirewallBackendFirewalld:
-		if stackAllowed(v2.FirewallStackV4) {
-			out, err := runCmd(cmdTimeout, "firewall-cmd", "--direct", "--get-chains", "ipv4", "filter")
-			if err != nil || !strings.Contains(out, iptablesChain) {
+func firewalldDirectLive() bool {
+	if stackAllowed(v2.FirewallStackV4) {
+		out, err := runCmd(cmdTimeout, "firewall-cmd", "--direct", "--get-chains", "ipv4", "filter")
+		if err != nil || !strings.Contains(out, iptablesChain) {
+			return false
+		}
+		if nftPersistWantsBaseAllows() {
+			marked, err := runCmd(cmdTimeout, "iptables", "-S", iptablesChain)
+			if err == nil && !strings.Contains(marked, plusCommentMark) {
 				return false
 			}
 		}
-		if stackAllowed(v2.FirewallStackV6) {
-			out, err := runCmd(cmdTimeout, "firewall-cmd", "--direct", "--get-chains", "ipv6", "filter")
-			if err != nil || !strings.Contains(out, iptablesChain) {
-				return false
-			}
-		}
-		return true
-	default:
-		return true
 	}
+	if stackAllowed(v2.FirewallStackV6) {
+		out, err := runCmd(cmdTimeout, "firewall-cmd", "--direct", "--get-chains", "ipv6", "filter")
+		if err != nil || !strings.Contains(out, iptablesChain) {
+			return false
+		}
+		if nftPersistWantsBaseAllows() && lookPath("ip6tables") {
+			marked, err := runCmd(cmdTimeout, "ip6tables", "-S", iptablesChain)
+			if err == nil && !strings.Contains(marked, plusCommentMark) {
+				return false
+			}
+		}
+	}
+	return true
 }

@@ -53,6 +53,28 @@ func TestNftChainJumpsToPlus(t *testing.T) {
 	}
 }
 
+func TestInetTablesForWatchSkipsPlusAndManagedTables(t *testing.T) {
+	listed := `table ip filter
+table ip nat
+table ip6 filter
+table inet filter
+table inet liteplus
+table inet ufw
+table inet firewalld
+table inet fw4
+`
+	got := inetTablesForWatch(parseNftListedTables(listed))
+	if len(got) != 2 {
+		t.Fatalf("inet watch tables: %+v", got)
+	}
+	if got[0].Family != "inet" || got[0].Table != "filter" {
+		t.Fatalf("first inet table: %+v", got[0])
+	}
+	if got[1].Family != "inet" || got[1].Table != "fw4" {
+		t.Fatalf("second inet table: %+v", got[1])
+	}
+}
+
 func TestAttachableInetHooksSkipsUfwAndFirewalld(t *testing.T) {
 	hooks := attachableInetHooks([]nftInputHook{
 		{Family: "inet", Table: "filter", Chain: "input"},
@@ -61,6 +83,33 @@ func TestAttachableInetHooksSkipsUfwAndFirewalld(t *testing.T) {
 	})
 	if len(hooks) != 1 || hooks[0].Table != "filter" {
 		t.Fatalf("only distro inet filter should be attached: %+v", hooks)
+	}
+}
+
+func TestNftTableLooksLiveRequiresPlusMarksWhenPersisted(t *testing.T) {
+	empty := `table inet liteplus {
+	chain input {
+		type filter hook input priority -150; policy accept;
+	}
+}
+`
+	if !nftTableLooksPresent(empty) {
+		t.Fatal("an empty plus table still exists and is leftover")
+	}
+	if nftTableLooksLive(empty, true) {
+		t.Fatal("a flushed plus chain must not look live when persisted allows need lite-plus marks")
+	}
+	if !nftTableLooksLive(empty, false) {
+		t.Fatal("an empty plus table is live when persist has no marked allows")
+	}
+	marked := `table inet liteplus {
+	chain input {
+		tcp dport 443 accept comment "lite-plus:web"
+	}
+}
+`
+	if !nftTableLooksLive(marked, true) {
+		t.Fatal("a plus table with lite-plus marks must look live")
 	}
 }
 

@@ -8,6 +8,10 @@ type noneBackend struct{}
 
 func currentBackend() backend { return noneBackend{} }
 
+func watchReady() bool { return false }
+
+func plusWatchLive() bool { return true }
+
 func (noneBackend) name() string { return v2.FirewallBackendNone }
 
 func (noneBackend) snapshot() v2.FirewallResultParams {

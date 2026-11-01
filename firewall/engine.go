@@ -105,7 +105,7 @@ func Apply(intent v2.FirewallIntent, holes []v2.FirewallHole) v2.FirewallResultP
 	if port := sshPortOf(intent); port != "" {
 		intent.SshPort = port
 	}
-	if err := persistState(intent, holes); err != nil {
+	if err := persistApplied(intent, holes, eng.name()); err != nil {
 		if needSSH {
 			restoreSSHConfigs(sshSnap)
 		}
@@ -253,13 +253,14 @@ func enabledRules(intent v2.FirewallIntent) []v2.FirewallRule {
 }
 
 type persistedFirewall struct {
-	Intent        v2.FirewallIntent `json:"intent"`
-	ListenHoles   []v2.FirewallHole `json:"listen_holes,omitempty"`
-	UfwIncoming   string            `json:"ufw_incoming,omitempty"`
-	WindowsPolicy string            `json:"windows_policy,omitempty"`
-	AppliedStacks bool              `json:"applied_stacks,omitempty"`
-	AppliedV4     bool              `json:"applied_v4,omitempty"`
-	AppliedV6     bool              `json:"applied_v6,omitempty"`
+	Intent         v2.FirewallIntent `json:"intent"`
+	ListenHoles    []v2.FirewallHole `json:"listen_holes,omitempty"`
+	UfwIncoming    string            `json:"ufw_incoming,omitempty"`
+	WindowsPolicy  string            `json:"windows_policy,omitempty"`
+	AppliedStacks  bool              `json:"applied_stacks,omitempty"`
+	AppliedV4      bool              `json:"applied_v4,omitempty"`
+	AppliedV6      bool              `json:"applied_v6,omitempty"`
+	AppliedBackend string            `json:"applied_backend,omitempty"`
 }
 
 var lastWindowsPolicy string
@@ -297,9 +298,11 @@ func restorePersistedLocked() error {
 	}
 	v2.UnifyPairedPolicy(&state.Intent)
 	lastWindowsPolicy = state.WindowsPolicy
+	if !watchReady() {
+		return nil
+	}
 	eng := currentBackend()
-	snap := eng.snapshot()
-	if !snap.Supported || !snap.Privileged {
+	if eng.name() == v2.FirewallBackendNone {
 		return nil
 	}
 	if port := sshPortOf(state.Intent); port != "" {
@@ -309,7 +312,7 @@ func restorePersistedLocked() error {
 	if err := eng.apply(state.Intent, holes); err != nil {
 		return err
 	}
-	_ = persistState(state.Intent, holes)
+	_ = persistApplied(state.Intent, holes, eng.name())
 	return persistBootLocked(eng, state.Intent, holes)
 }
 
@@ -409,18 +412,28 @@ func stacksChangedSincePersist() bool {
 }
 
 func persistState(intent v2.FirewallIntent, holes []v2.FirewallHole) error {
+	return persistApplied(intent, holes, currentBackend().name())
+}
+
+func persistApplied(intent v2.FirewallIntent, holes []v2.FirewallHole, backend string) error {
 	unifyPairedPolicy(&intent)
 	v4, v6 := stackPresent()
 	state := persistedFirewall{
-		Intent:        intent,
-		ListenHoles:   holes,
-		WindowsPolicy: lastWindowsPolicy,
-		AppliedStacks: true,
-		AppliedV4:     v4,
-		AppliedV6:     v6,
+		Intent:         intent,
+		ListenHoles:    holes,
+		WindowsPolicy:  lastWindowsPolicy,
+		AppliedStacks:  true,
+		AppliedV4:      v4,
+		AppliedV6:      v6,
+		AppliedBackend: backend,
 	}
-	if prev := loadPersist(); prev != nil && state.WindowsPolicy == "" {
-		state.WindowsPolicy = prev.WindowsPolicy
+	if prev := loadPersist(); prev != nil {
+		if state.WindowsPolicy == "" {
+			state.WindowsPolicy = prev.WindowsPolicy
+		}
+		if (state.AppliedBackend == "" || state.AppliedBackend == v2.FirewallBackendNone) && prev.AppliedBackend != "" {
+			state.AppliedBackend = prev.AppliedBackend
+		}
 	}
 	raw, err := json.Marshal(state)
 	if err != nil {

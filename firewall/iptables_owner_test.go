@@ -47,6 +47,15 @@ func TestIptablesFilterOwnedByHostDetectsAnyHostInput(t *testing.T) {
 	if !iptablesFilterOwnedByHost("", "*filter\n:INPUT DROP [0:0]\nCOMMIT\n") {
 		t.Fatal("INPUT policy DROP is a host filter even with no extra rules")
 	}
+	if !iptablesFilterOwnedByHost("", "-P INPUT DROP\n") {
+		t.Fatal("iptables -S INPUT policy DROP must count as a host filter")
+	}
+	if !iptablesFilterOwnedByHost("", "-P INPUT ACCEPT\n-A INPUT -j LITE_PLUS\n-A INPUT -j 1PANEL_BASIC\n") {
+		t.Fatal("iptables -S INPUT host jumps must share the iptables table")
+	}
+	if iptablesFilterOwnedByHost("", "-P INPUT ACCEPT\n-A INPUT -j LITE_PLUS\n") {
+		t.Fatal("iptables -S INPUT plus jump must not look like another host firewall")
+	}
 	if !iptablesFilterOwnedByHost("table ip filter { chain INPUT { type filter hook input priority filter; policy drop; } }", "") {
 		t.Fatal("nft INPUT policy drop is a host filter")
 	}

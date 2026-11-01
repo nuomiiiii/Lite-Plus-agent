@@ -78,10 +78,6 @@ func init() {
 	go pruneMCPFileSessions()
 }
 
-func ExecuteMCPFile(payload []byte) (any, error) {
-	return ExecuteMCPFileForLease(context.Background(), "", payload)
-}
-
 // ExecuteMCPFileForLease runs one file-manager request, keeping upload/download
 // state for this lease until it is idle, revoked, or expired.
 func ExecuteMCPFileForLease(ctx context.Context, leaseID string, payload []byte) (any, error) {
