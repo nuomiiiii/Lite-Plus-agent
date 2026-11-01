@@ -14,7 +14,7 @@ func firewalldDirectLive() bool {
 		if err != nil || !strings.Contains(out, iptablesChain) {
 			return false
 		}
-		if nftPersistWantsBaseAllows() {
+		if persistWantsMarkedAllows(v2.FirewallStackV4) {
 			marked, err := runCmd(cmdTimeout, "iptables", "-S", iptablesChain)
 			if err == nil && !strings.Contains(marked, plusCommentMark) {
 				return false
@@ -26,7 +26,7 @@ func firewalldDirectLive() bool {
 		if err != nil || !strings.Contains(out, iptablesChain) {
 			return false
 		}
-		if nftPersistWantsBaseAllows() && lookPath("ip6tables") {
+		if persistWantsMarkedAllows(v2.FirewallStackV6) && lookPath("ip6tables") {
 			marked, err := runCmd(cmdTimeout, "ip6tables", "-S", iptablesChain)
 			if err == nil && !strings.Contains(marked, plusCommentMark) {
 				return false

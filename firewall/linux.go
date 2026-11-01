@@ -213,7 +213,11 @@ func iptablesPlusChainMarked(bin string) bool {
 	if err != nil {
 		return false
 	}
-	if nftPersistWantsBaseAllows() && !strings.Contains(out, plusCommentMark) {
+	stack := v2.FirewallStackV4
+	if bin == "ip6tables" {
+		stack = v2.FirewallStackV6
+	}
+	if persistWantsMarkedAllows(stack) && !strings.Contains(out, plusCommentMark) {
 		return false
 	}
 	return true

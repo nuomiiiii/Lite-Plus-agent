@@ -60,3 +60,47 @@ func eachStackedRule(rule v2.FirewallRule, fn func(v2.FirewallRule)) {
 		fn(next)
 	}
 }
+
+func persistWantsMarkedAllows(stack string) bool {
+	state := loadPersist()
+	if state == nil {
+		return false
+	}
+	return intentWantsMarkedAllows(state.Intent, state.ListenHoles, stack)
+}
+
+// intentWantsMarkedAllows is true when apply would write a lite-plus: comment
+// onto that family. A host with IPv6 but only IPv4 allows leaves ip6tables
+// LITE_PLUS as lo/conntrack/icmpv6 — that chain is live, not flushed.
+func intentWantsMarkedAllows(intent v2.FirewallIntent, holes []v2.FirewallHole, stack string) bool {
+	if stack != v2.FirewallStackV4 && stack != v2.FirewallStackV6 {
+		return false
+	}
+	for _, rule := range enabledRules(intent) {
+		if strings.EqualFold(strings.TrimSpace(rule.Action), v2.FirewallActionDeny) {
+			continue
+		}
+		if ruleAppliesToStack(rule, stack) {
+			return true
+		}
+	}
+	deny := (stack == v2.FirewallStackV4 && intent.DefaultDeny4) || (stack == v2.FirewallStackV6 && intent.DefaultDeny6)
+	if !deny {
+		return false
+	}
+	for _, hole := range liveHoles(intent, holes) {
+		if holeAppliesToStack(hole, stack) {
+			return true
+		}
+	}
+	want := false
+	eachKeepRule(intent, func(rule v2.FirewallRule) {
+		if want || strings.EqualFold(strings.TrimSpace(rule.Action), v2.FirewallActionDeny) {
+			return
+		}
+		if ruleAppliesToStack(rule, stack) {
+			want = true
+		}
+	})
+	return want
+}

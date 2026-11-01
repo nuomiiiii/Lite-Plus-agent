@@ -116,11 +116,7 @@ func nftBaseAllowTokens(intent v2.FirewallIntent, holes []v2.FirewallHole) [][]s
 }
 
 func nftPersistWantsBaseAllows() bool {
-	state := loadPersist()
-	if state == nil {
-		return false
-	}
-	return len(nftBaseAllowTokens(state.Intent, state.ListenHoles)) > 0
+	return persistWantsMarkedAllows(v2.FirewallStackV4) || persistWantsMarkedAllows(v2.FirewallStackV6)
 }
 
 func inetPlusJumpLive(hooks []nftInputHook) bool {

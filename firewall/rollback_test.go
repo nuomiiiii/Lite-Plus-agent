@@ -333,6 +333,9 @@ func TestRollbackClearsOwnedRules(t *testing.T) {
 	if !strings.Contains(liveFn, `"-S", "INPUT"`) || !strings.Contains(liveFn, `"-S", iptablesChain`) {
 		t.Fatal("iptables live watch must check the INPUT jump and plus marks on LITE_PLUS")
 	}
+	if !strings.Contains(liveFn, "persistWantsMarkedAllows(") {
+		t.Fatal("iptables live watch must not require lite-plus marks on a family with no plus allows")
+	}
 	staleLinux, err := os.ReadFile("plus_stale_linux.go")
 	if err != nil {
 		t.Fatal(err)

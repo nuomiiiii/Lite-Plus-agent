@@ -39,6 +39,26 @@ func TestRuleAppliesToStackDualStack(t *testing.T) {
 	}
 }
 
+func TestIntentWantsMarkedAllowsSkipsEmptyFamily(t *testing.T) {
+	intent := v2.FirewallIntent{Rules: []v2.FirewallRule{{
+		ID: "web", Enabled: true, Action: v2.FirewallActionAllow,
+		Protocol: v2.FirewallProtoTCP, Port: "443", Stack: v2.FirewallStackV4,
+	}}}
+	if !intentWantsMarkedAllows(intent, nil, v2.FirewallStackV4) {
+		t.Fatal("v4 allow must expect v4 marks")
+	}
+	if intentWantsMarkedAllows(intent, nil, v2.FirewallStackV6) {
+		t.Fatal("v4-only allows must not expect v6 lite-plus marks on an icmp-only LITE_PLUS")
+	}
+	v6 := v2.FirewallIntent{Rules: []v2.FirewallRule{{
+		ID: "web6", Enabled: true, Action: v2.FirewallActionAllow,
+		Protocol: v2.FirewallProtoTCP, Port: "443", Stack: v2.FirewallStackV6,
+	}}}
+	if intentWantsMarkedAllows(v6, nil, v2.FirewallStackV4) || !intentWantsMarkedAllows(v6, nil, v2.FirewallStackV6) {
+		t.Fatal("v6-only allow must expect marks only on v6")
+	}
+}
+
 func TestEachStackedRuleKeepsDeclaredStack(t *testing.T) {
 	var stacks []string
 	eachStackedRule(v2.FirewallRule{Action: "allow", Protocol: "tcp", Port: "2083", Stack: v2.FirewallStackV6}, func(next v2.FirewallRule) {
