@@ -2,7 +2,7 @@
 
 Lite-Plus 的跨平台节点监控与节点管理 Agent。本仓库版本在基础监控之外，支持安全远程终端、文件管理、远程命令、Cloudflare Access、在线配置下发、配置结果回执，以及双核节点管理。
 
-当前稳定版本：`0.0.3.1`
+当前稳定版本：`0.0.3.2`
 
 使用 MCP 代理功能，Lite需升级至 2.3.3 或更高版本。
 
@@ -59,7 +59,7 @@ docker pull ghcr.io/nuomiiiii/lite-plus-agent:latest
 也可以拉取固定版本：
 
 ```bash
-docker pull ghcr.io/nuomiiiii/lite-plus-agent:0.0.3.1
+docker pull ghcr.io/nuomiiiii/lite-plus-agent:0.0.3.2
 ```
 
 容器的启动参数、宿主机目录挂载和节点 Token 请以 Lite 后台生成的部署命令为准。未禁用自动更新时，容器内的正式版会自行替换程序；也可以拉取新镜像并重建容器。
@@ -223,6 +223,7 @@ Client ID 与 Client Secret 必须成对配置，可以选择命令行参数、�
 
 | 版本 | 主要内容 |
 | --- | --- |
+| `0.0.3.2` | 支持主控下发的转发：把线路入站转到落地入站；可选不启用、主备或负载，主备/均不通时可走直连。修复 sing-box 上 Hysteria2 / TUIC / Shadowsocks 以及公网 TLS Trojan / VMess 用量不记账的 bug。 |
 | `0.0.3.1` | 修复部分机器上防火墙守护仍把系统负载打高的问题。开了 IPv6 但放行只有 IPv4 时，不再把空的 IPv6 链当成规则丢了去整表重写。修复配额用尽或吊销后 sing-box 用户仍能连上、以及 HTTP 入站改登录名不生效的问题。 |
 | `0.0.3.0` | 汇总 0.0.2 的 Linux 入站接管与后续修复。挂到本机入站时放行只写在 Plus 自己的链里，不再在主机入站上重复一份。 |
 | `0.0.2.9` | 修复部分已有本机入站表的机器上，已生效的放行会被反复重写、系统负载被打高的 bug。 |

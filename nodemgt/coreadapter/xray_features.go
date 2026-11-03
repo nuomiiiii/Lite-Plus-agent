@@ -1,14 +1,16 @@
 package coreadapter
 
 // Xray handlers for Plus. Keep every inbound/outbound/transport from distro/all.
-// Drop commander, observatory, metrics, YAML/TOML loaders and the xray CLI —
+// Drop commander, metrics, YAML/TOML loaders and the xray CLI —
 // those are not proxy protocols and they inflate the Agent package.
+// Observatory stays: forward-chain failover uses health probes + balancer fallbackTag.
 import (
 	_ "github.com/xtls/xray-core/app/dispatcher"
 	_ "github.com/xtls/xray-core/app/dns"
 	_ "github.com/xtls/xray-core/app/dns/fakedns"
 	_ "github.com/xtls/xray-core/app/geodata"
 	_ "github.com/xtls/xray-core/app/log"
+	_ "github.com/xtls/xray-core/app/observatory"
 	_ "github.com/xtls/xray-core/app/policy"
 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"

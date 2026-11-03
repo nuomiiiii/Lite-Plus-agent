@@ -528,8 +528,19 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 		"inbounds":  items,
 		"outbounds": obs,
 	}
-	if len(rules) > 0 {
-		cfg["routing"] = map[string]any{"domainStrategy": "AsIs", "rules": rules}
+	balancers, observatory := xrayBalancers(outbounds)
+	if len(rules) > 0 || len(balancers) > 0 {
+		routing := map[string]any{"domainStrategy": "AsIs"}
+		if len(rules) > 0 {
+			routing["rules"] = rules
+		}
+		if len(balancers) > 0 {
+			routing["balancers"] = balancers
+		}
+		cfg["routing"] = routing
+	}
+	if observatory != nil {
+		cfg["observatory"] = observatory
 	}
 	applyXrayDialStack(obs, c.dialStack)
 	raw, err := json.Marshal(cfg)
@@ -929,6 +940,7 @@ func xrayRouteRules(routes []RouteSpec, outbounds []OutboundSpec, inboundTags ma
 			}
 		}
 	}
+	groups := groupOutboundTags(outbounds)
 	var rules []map[string]any
 	for _, row := range sorted {
 		if !row.Enabled {
@@ -952,7 +964,12 @@ func xrayRouteRules(routes []RouteSpec, outbounds []OutboundSpec, inboundTags ma
 		if tag == "" {
 			continue
 		}
-		rule := map[string]any{"type": "field", "outboundTag": tag}
+		rule := map[string]any{"type": "field"}
+		if groups[tag] || groups[s.OutboundID] {
+			rule["balancerTag"] = tag
+		} else {
+			rule["outboundTag"] = tag
+		}
 		if tags := inboundAliasTags(s.InboundID, inboundTags); len(tags) > 0 {
 			rule["inboundTag"] = tags
 		}
@@ -977,4 +994,80 @@ func xrayRouteRules(routes []RouteSpec, outbounds []OutboundSpec, inboundTags ma
 		rules = append(rules, rule)
 	}
 	return rules
+}
+
+func groupOutboundTags(rows []OutboundSpec) map[string]bool {
+	out := map[string]bool{}
+	for _, row := range rows {
+		if !chainGroupProtocol(row.Protocol) {
+			continue
+		}
+		tag := outboundTag(row)
+		if tag != "" {
+			out[tag] = true
+		}
+		if row.ID != "" {
+			out[row.ID] = true
+		}
+	}
+	return out
+}
+
+func xrayBalancers(rows []OutboundSpec) ([]map[string]any, map[string]any) {
+	tags := outboundTagIndex(rows)
+	var balancers []map[string]any
+	var selectors []string
+	for _, row := range rows {
+		if !row.Enabled || !chainGroupProtocol(row.Protocol) {
+			continue
+		}
+		spec := parseChainGroup(row)
+		members := resolveMemberTags(spec.Members, tags)
+		if len(members) == 0 {
+			continue
+		}
+		item := map[string]any{
+			"tag":      outboundTag(row),
+			"strategy": map[string]any{"type": "leastPing"},
+		}
+		if spec.Strategy == "failover" || strings.EqualFold(row.Protocol, "failover") {
+			item["selector"] = []string{members[0]}
+			if spec.BackupDirect || len(members) == 1 {
+				item["fallbackTag"] = "direct"
+				selectors = append(selectors, members[0])
+			} else if spec.Fallback {
+				item["selector"] = members
+				item["fallbackTag"] = "direct"
+				item["strategy"] = map[string]any{
+					"type": "leastLoad",
+					"settings": map[string]any{
+						"expected": 1,
+						"costs": []map[string]any{{
+							"match": members[1],
+							"value": 1e12,
+						}},
+					},
+				}
+				selectors = append(selectors, members...)
+			} else {
+				item["fallbackTag"] = members[1]
+				selectors = append(selectors, members[0], members[1])
+			}
+		} else {
+			item["selector"] = members
+			if spec.Fallback {
+				item["fallbackTag"] = "direct"
+			}
+			selectors = append(selectors, members...)
+		}
+		balancers = append(balancers, item)
+	}
+	if len(balancers) == 0 {
+		return nil, nil
+	}
+	return balancers, map[string]any{
+		"subjectSelector": uniqueStrings(selectors),
+		"probeUrl":        chainProbeURL,
+		"probeInterval":   "1m",
+	}
 }

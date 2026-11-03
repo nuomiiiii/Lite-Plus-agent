@@ -603,6 +603,36 @@ func TestSingBoxSOCKSMapsUsername(t *testing.T) {
 	}
 }
 
+func TestSingBoxOutboundMapsHysteria2AndTUIC(t *testing.T) {
+	hy2 := singBoxOutbounds([]OutboundSpec{{
+		Name: "hy2-exit", Protocol: "hysteria2", Enabled: true,
+		SettingsJSON: `{"address":"hy2.example.com","port":443,"password":"hy2-secret","transport":"quic","security":"tls","sni":"hy2.example.com"}`,
+	}})
+	item := hy2[len(hy2)-1]
+	if item["type"] != "hysteria2" || item["password"] != "hy2-secret" || item["server"] != "hy2.example.com" {
+		t.Fatalf("hy2 outbound %v", item)
+	}
+	if _, ok := item["transport"]; ok {
+		t.Fatalf("hy2 must not set transport: %v", item)
+	}
+	tls, _ := item["tls"].(map[string]any)
+	if tls == nil || tls["enabled"] != true || tls["server_name"] != "hy2.example.com" {
+		t.Fatalf("hy2 tls %v", item)
+	}
+
+	tuic := singBoxOutbounds([]OutboundSpec{{
+		Name: "tuic-exit", Protocol: "tuic", Enabled: true,
+		SettingsJSON: `{"address":"tuic.example.com","port":443,"uuid":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","password":"tuic-secret","transport":"quic","security":"tls","sni":"tuic.example.com"}`,
+	}})
+	item = tuic[len(tuic)-1]
+	if item["type"] != "tuic" || item["uuid"] != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" || item["password"] != "tuic-secret" {
+		t.Fatalf("tuic outbound %v", item)
+	}
+	if _, ok := item["transport"]; ok {
+		t.Fatalf("tuic must not set transport: %v", item)
+	}
+}
+
 func TestSingBoxOutboundMapsShadowsocksMethod(t *testing.T) {
 	outbounds := singBoxOutbounds([]OutboundSpec{{
 		Protocol: "shadowsocks", Enabled: true, SettingsJSON: `{"ss_method":"aes-128-gcm"}`,
@@ -1213,5 +1243,153 @@ func TestXrayHTTPConfigUsesUsernameAndUUID(t *testing.T) {
 		if !strings.Contains(text, part) {
 			t.Fatalf("missing %s in %s", part, text)
 		}
+	}
+}
+
+func TestXrayChainGroupUsesBalancerAndObservatory(t *testing.T) {
+	c := newXrayCore()
+	c.outbounds = []OutboundSpec{
+		{ID: "hop-a", Name: "relay-a", Protocol: "vless", Enabled: true, SettingsJSON: `{"address":"a.example.com","port":443,"uuid":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}`},
+		{ID: "hop-b", Name: "relay-b", Protocol: "vless", Enabled: true, SettingsJSON: `{"address":"b.example.com","port":443,"uuid":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}`},
+		{ID: "grp", Name: "chain-exit", Protocol: "failover", Enabled: true, SettingsJSON: `{"chain_group":true,"member_ids":["hop-a","hop-b"],"strategy":"failover"}`},
+	}
+	c.routes = []RouteSpec{{
+		ID: "r1", Enabled: true, RuleJSON: `{"inbound_id":"in1","outbound_id":"grp"}`,
+	}}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, part := range []string{
+		`"balancerTag":"chain-exit"`,
+		`"probeUrl"`,
+		`"subjectSelector"`,
+		`"protocol":"vless"`,
+	} {
+		if !strings.Contains(text, part) {
+			t.Fatalf("missing %s in %s", part, text)
+		}
+	}
+	if strings.Contains(text, `"protocol":"failover"`) {
+		t.Fatal("group outbound should not be a real xray protocol")
+	}
+	if !strings.Contains(text, `"fallbackTag":"relay-b"`) || !strings.Contains(text, `"selector":["relay-a"]`) {
+		t.Fatal("failover should keep the primary selector and fall back to the backup landing")
+	}
+}
+
+func TestXrayFailoverFallbackDirectUsesBothLandings(t *testing.T) {
+	c := newXrayCore()
+	c.outbounds = []OutboundSpec{
+		{ID: "hop-a", Name: "relay-a", Protocol: "vless", Enabled: true, SettingsJSON: `{"address":"a.example.com","port":443,"uuid":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}`},
+		{ID: "hop-b", Name: "relay-b", Protocol: "vless", Enabled: true, SettingsJSON: `{"address":"b.example.com","port":443,"uuid":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}`},
+		{ID: "grp", Name: "chain-exit", Protocol: "failover", Enabled: true, SettingsJSON: `{"chain_group":true,"fallback_direct":true,"member_ids":["hop-a","hop-b"],"strategy":"failover"}`},
+	}
+	c.routes = []RouteSpec{{
+		ID: "r1", Enabled: true, RuleJSON: `{"inbound_id":"in1","outbound_id":"grp"}`,
+	}}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"fallbackTag":"direct"`) {
+		t.Fatal("failover with fallback_direct should fall back to direct after both landings")
+	}
+	if !strings.Contains(text, `"selector":["relay-a","relay-b"]`) {
+		t.Fatal("failover with fallback_direct should health-check both landings")
+	}
+	if !strings.Contains(text, `"type":"leastLoad"`) || !strings.Contains(text, `"match":"relay-b"`) {
+		t.Fatal("failover with fallback_direct should keep the primary landing preferred")
+	}
+	if strings.Contains(text, `"fallbackTag":"relay-b"`) {
+		t.Fatal("backup landing must not be the last-resort fallback when direct is enabled")
+	}
+}
+
+func TestXrayFailoverBackupDirect(t *testing.T) {
+	c := newXrayCore()
+	c.outbounds = []OutboundSpec{
+		{ID: "hop-a", Name: "relay-a", Protocol: "vless", Enabled: true, SettingsJSON: `{"address":"a.example.com","port":443,"uuid":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}`},
+		{ID: "grp", Name: "chain-exit", Protocol: "failover", Enabled: true, SettingsJSON: `{"chain_group":true,"backup_direct":true,"member_ids":["hop-a"],"strategy":"failover"}`},
+	}
+	c.routes = []RouteSpec{{
+		ID: "r1", Enabled: true, RuleJSON: `{"inbound_id":"in1","outbound_id":"grp"}`,
+	}}
+	raw, err := c.configJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"fallbackTag":"direct"`) {
+		t.Fatal("backup direct should fall back to the built-in direct outbound")
+	}
+	if !strings.Contains(text, `"selector":["relay-a"]`) {
+		t.Fatal("failover should probe only the primary landing")
+	}
+}
+
+func TestSingBoxChainGroupWrapsDirectFallback(t *testing.T) {
+	out := singBoxOutbounds([]OutboundSpec{
+		{ID: "hop-a", Name: "relay-a", Protocol: "vless", Enabled: true, SettingsJSON: `{"address":"a.example.com","port":443,"uuid":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}`},
+		{ID: "hop-b", Name: "relay-b", Protocol: "vless", Enabled: true, SettingsJSON: `{"address":"b.example.com","port":443,"uuid":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}`},
+		{ID: "grp", Name: "chain-exit", Protocol: "urltest", Enabled: true, SettingsJSON: `{"chain_group":true,"fallback_direct":true,"member_ids":["hop-a","hop-b"],"strategy":"urltest","interval":"1m"}`},
+	})
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, part := range []string{
+		`"tag":"chain-exit-landings"`,
+		`"tag":"chain-exit"`,
+		`"tag":"relay-a"`,
+		`"outbounds":["chain-exit-landings","direct"]`,
+		`"type":"urltest"`,
+	} {
+		if !strings.Contains(text, part) {
+			t.Fatalf("missing %s in %s", part, text)
+		}
+	}
+}
+
+func TestSingBoxFailoverFallbackDirectWrapsLandings(t *testing.T) {
+	out := singBoxOutbounds([]OutboundSpec{
+		{ID: "hop-a", Name: "relay-a", Protocol: "vless", Enabled: true, SettingsJSON: `{"address":"a.example.com","port":443,"uuid":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}`},
+		{ID: "hop-b", Name: "relay-b", Protocol: "vless", Enabled: true, SettingsJSON: `{"address":"b.example.com","port":443,"uuid":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}`},
+		{ID: "grp", Name: "chain-exit", Protocol: "failover", Enabled: true, SettingsJSON: `{"chain_group":true,"fallback_direct":true,"member_ids":["hop-a","hop-b"],"strategy":"failover","interval":"1m"}`},
+	})
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, part := range []string{
+		`"tag":"chain-exit-landings"`,
+		`"outbounds":["relay-a","relay-b"]`,
+		`"outbounds":["chain-exit-landings","direct"]`,
+	} {
+		if !strings.Contains(text, part) {
+			t.Fatalf("missing %s in %s", part, text)
+		}
+	}
+}
+
+func TestSingBoxFailoverBackupDirect(t *testing.T) {
+	out := singBoxOutbounds([]OutboundSpec{
+		{ID: "hop-a", Name: "relay-a", Protocol: "vless", Enabled: true, SettingsJSON: `{"address":"a.example.com","port":443,"uuid":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}`},
+		{ID: "grp", Name: "chain-exit", Protocol: "failover", Enabled: true, SettingsJSON: `{"chain_group":true,"backup_direct":true,"member_ids":["hop-a"],"strategy":"failover","interval":"1m"}`},
+	})
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"outbounds":["relay-a","direct"]`) {
+		t.Fatalf("backup direct should urltest primary then direct: %s", text)
+	}
+	if strings.Contains(text, "chain-exit-landings") {
+		t.Fatal("single-landing backup direct should not wrap an inner landing group")
 	}
 }

@@ -148,7 +148,7 @@ type policyEngine struct {
 	seen       map[string]map[string]time.Time
 	skipCoreIP map[string]struct{}
 	meterCore  map[string]struct{}
-	coreConns  map[string]map[net.Conn]struct{}
+	coreConns  map[string]map[io.Closer]struct{}
 	dialStack  string
 }
 
@@ -260,16 +260,16 @@ func (p *policyEngine) userBlocked(userID string) bool {
 	return false
 }
 
-func (p *policyEngine) trackCoreConn(userID string, conn net.Conn) func() {
+func (p *policyEngine) trackCoreConn(userID string, conn io.Closer) func() {
 	if userID == "" || conn == nil {
 		return func() {}
 	}
 	p.mu.Lock()
 	if p.coreConns == nil {
-		p.coreConns = map[string]map[net.Conn]struct{}{}
+		p.coreConns = map[string]map[io.Closer]struct{}{}
 	}
 	if p.coreConns[userID] == nil {
-		p.coreConns[userID] = map[net.Conn]struct{}{}
+		p.coreConns[userID] = map[io.Closer]struct{}{}
 	}
 	p.coreConns[userID][conn] = struct{}{}
 	p.mu.Unlock()
@@ -493,12 +493,23 @@ func (p *policyEngine) lookupUUID(id string) (UserSpec, bool) {
 }
 
 func (p *policyEngine) mapStatName(name string) string {
+	if id := p.knownUserID(name); id != "" {
+		return id
+	}
+	return strings.TrimSpace(name)
+}
+
+func (p *policyEngine) knownUserID(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if spec, ok := p.byLogin[name]; ok {
 		return spec.ID
 	}
-	if spec, ok := p.byUUID[strings.ToLower(strings.TrimSpace(name))]; ok {
+	if spec, ok := p.byUUID[strings.ToLower(name)]; ok {
 		return spec.ID
 	}
 	for _, u := range p.users {
@@ -506,7 +517,7 @@ func (p *policyEngine) mapStatName(name string) string {
 			return u.ID
 		}
 	}
-	return name
+	return ""
 }
 
 func identityFront(in InboundSpec, users []UserSpec) bool {

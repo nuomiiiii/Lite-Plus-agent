@@ -188,7 +188,7 @@ func (c *singBoxCore) restartLocked() error {
 	c.cancel = cancel
 	c.policy.sync(live, c.denied)
 	c.policy.setDialStack(c.dialStack)
-	c.inst.Router().AppendTracker(newIPLimitTracker(c.policy))
+	attachSingBoxTrackers(c.inst, c.policy)
 	started, err := startPolicyFronts(c.policy, fronts)
 	if err != nil {
 		_ = c.stopLocked()
@@ -231,12 +231,20 @@ func (c *singBoxCore) restoreLastGood() {
 	c.cancel = cancel
 	c.policy.sync(live, c.denied)
 	c.policy.setDialStack(c.dialStack)
-	c.inst.Router().AppendTracker(newIPLimitTracker(c.policy))
+	attachSingBoxTrackers(c.inst, c.policy)
 	started, ferr := startPolicyFronts(c.policy, fronts)
 	if ferr == nil {
 		c.fronts = started
 	}
 	c.inbounds = append([]InboundSpec(nil), c.lastIn...)
+}
+
+func attachSingBoxTrackers(inst *box.Box, policy *policyEngine) {
+	if inst == nil || policy == nil {
+		return
+	}
+	inst.Router().AppendTracker(newIPLimitTracker(policy))
+	inst.Router().AppendTracker(newQuotaTracker(policy))
 }
 
 func startSingBox(raw []byte) (*box.Box, context.CancelFunc, error) {
@@ -269,6 +277,7 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 	var fronts []frontSpec
 	var policyTags []string
 	var skipIP []string
+	var meterTags []string
 	listenTags := map[string][]string{}
 	for i, in := range inbounds {
 		tag := in.ID
@@ -292,12 +301,11 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 		listenAddr := hosts[0]
 		listenPort := in.Port
 		var pendingFronts []frontSpec
-		udp := udpInbound(proto)
 		// SOCKS/HTTP/VLESS TCP+WS authenticate on the policy front and hold
 		// IP from conn.RemoteAddr. Everything else authenticates inside
 		// sing-box. Inbound PROXY protocol was removed in 1.6.0, so those
 		// protocols must bind the public address or device limits see 127.0.0.1.
-		public := udp || coreOwnedTLS(in, users) || !identityFront(in, users)
+		public := singBoxPublicCore(in, users)
 		if !public {
 			internalPort, err := reserveLoopbackPort()
 			if err != nil {
@@ -437,6 +445,9 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 			if identityFront(in, users) {
 				skipIP = append(skipIP, useTag)
 			}
+			if public && !policyExitNeeded(in, users, false) {
+				meterTags = append(meterTags, useTag)
+			}
 		}
 		if policyExitNeeded(in, users, false) {
 			if extra := listenTags[in.ID]; len(extra) > 0 {
@@ -463,6 +474,7 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 		fronts = append(fronts, extra...)
 	}
 	c.policy.setSkipCoreIP(skipIP)
+	c.policy.setMeterCore(meterTags)
 	cfg := map[string]any{
 		"log":       map[string]any{"level": "error", "timestamp": false},
 		"inbounds":  items,
@@ -601,6 +613,8 @@ func singBoxOutbounds(rows []OutboundSpec) []map[string]any {
 			out = append(out, map[string]any{"type": "direct", "tag": tag})
 		case "blackhole", "block":
 			out = append(out, map[string]any{"type": "block", "tag": tag})
+		case "urltest", "failover":
+			out = append(out, singBoxGroupOutbounds(row, tag, tags)...)
 		default:
 			out = append(out, singBoxProxyOutbound(row, tag, tags))
 		}
@@ -627,6 +641,52 @@ func outboundTagIndex(rows []OutboundSpec) map[string]string {
 		}
 	}
 	return idx
+}
+
+func singBoxGroupOutbounds(row OutboundSpec, tag string, tags map[string]string) []map[string]any {
+	spec := parseChainGroup(row)
+	members := resolveMemberTags(spec.Members, tags)
+	if len(members) == 0 {
+		return nil
+	}
+	failover := spec.Strategy == "failover" || strings.EqualFold(row.Protocol, "failover")
+	tolerance := 50
+	if failover {
+		tolerance = 10000
+	}
+	useDirect := spec.BackupDirect || spec.Fallback || (failover && len(members) == 1)
+	innerMembers := members
+	inner := map[string]any{
+		"type":                        "urltest",
+		"tag":                         tag,
+		"outbounds":                   innerMembers,
+		"url":                         chainProbeURL,
+		"interval":                    spec.Interval,
+		"tolerance":                   tolerance,
+		"interrupt_exist_connections": true,
+	}
+	if !useDirect {
+		return []map[string]any{inner}
+	}
+	if spec.BackupDirect || len(members) == 1 {
+		inner["outbounds"] = []string{members[0], "direct"}
+		inner["tolerance"] = 30000
+		return []map[string]any{inner}
+	}
+	innerTag := tag + "-landings"
+	inner["tag"] = innerTag
+	return []map[string]any{
+		inner,
+		{
+			"type":                        "urltest",
+			"tag":                         tag,
+			"outbounds":                   []string{innerTag, "direct"},
+			"url":                         chainProbeURL,
+			"interval":                    spec.Interval,
+			"tolerance":                   30000,
+			"interrupt_exist_connections": true,
+		},
+	}
 }
 
 func singBoxProxyOutbound(row OutboundSpec, tag string, tags map[string]string) map[string]any {
@@ -960,4 +1020,12 @@ func udpInbound(proto string) bool {
 	default:
 		return false
 	}
+}
+
+func singBoxPublicCore(in InboundSpec, users []UserSpec) bool {
+	proto := strings.ToLower(strings.TrimSpace(in.Protocol))
+	if proto == "" {
+		proto = "socks"
+	}
+	return udpInbound(proto) || coreOwnedTLS(in, users) || !identityFront(in, users)
 }
