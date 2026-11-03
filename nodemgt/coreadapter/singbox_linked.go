@@ -269,6 +269,7 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 	var fronts []frontSpec
 	var policyTags []string
 	var skipIP []string
+	var meterTags []string
 	listenTags := map[string][]string{}
 	for i, in := range inbounds {
 		tag := in.ID
@@ -418,6 +419,10 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 			}
 		}
 		applySingBoxUDPFragment(item, in)
+		// Protocols that authenticate inside the core and do not route through
+		// a policy front or policy exit SOCKS hop have no other byte accounting
+		// path, so their connections are metered inside sing-box.
+		metered := !identityFront(in, users) && !policyExitNeeded(in, users, false)
 		listenHosts := []string{listenAddr}
 		if public {
 			listenHosts = publicCoreListenHosts(hosts, "tcp4")
@@ -436,6 +441,9 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 			}
 			if identityFront(in, users) {
 				skipIP = append(skipIP, useTag)
+			}
+			if metered {
+				meterTags = append(meterTags, useTag)
 			}
 		}
 		if policyExitNeeded(in, users, false) {
@@ -463,6 +471,7 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 		fronts = append(fronts, extra...)
 	}
 	c.policy.setSkipCoreIP(skipIP)
+	c.policy.setMeterCore(meterTags)
 	cfg := map[string]any{
 		"log":       map[string]any{"level": "error", "timestamp": false},
 		"inbounds":  items,
