@@ -169,6 +169,30 @@ func (p *policyEngine) meterCoreTag(tag string) bool {
 	return ok
 }
 
+// meterUser resolves the identity reported by the core to a configured user
+// ID. Only known users are metered: an unknown or empty identity must not
+// create a phantom quota entry.
+func (p *policyEngine) meterUser(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if spec, ok := p.byLogin[name]; ok {
+		return spec.ID
+	}
+	if spec, ok := p.byUUID[strings.ToLower(name)]; ok {
+		return spec.ID
+	}
+	for _, u := range p.users {
+		if u.ID == name {
+			return u.ID
+		}
+	}
+	return ""
+}
+
 func (p *policyEngine) accountLinkBytes(userID string, n int) bool {
 	if n <= 0 {
 		return true
