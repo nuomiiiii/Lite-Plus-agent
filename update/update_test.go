@@ -14,8 +14,8 @@ import (
 )
 
 func TestDefaultUpdateRepo(t *testing.T) {
-	if CurrentVersion != "0.0.3.3" {
-		t.Fatalf("CurrentVersion = %q, want 0.0.3.3", CurrentVersion)
+	if CurrentVersion != "0.2.0.0" {
+		t.Fatalf("CurrentVersion = %q, want 0.2.0.0", CurrentVersion)
 	}
 	if Repo != "nuomiiiii/Lite-Plus-agent" {
 		t.Fatalf("Repo = %q, want nuomiiiii/Lite-Plus-agent", Repo)
