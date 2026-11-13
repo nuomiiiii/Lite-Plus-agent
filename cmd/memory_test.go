@@ -105,6 +105,15 @@ func TestParseCgroupBytes(t *testing.T) {
 	}
 }
 
+func TestPickProxyMemoryLimitStaysBelowHost(t *testing.T) {
+	const mib = int64(1 << 20)
+	got := pickProxyMemoryLimit(512*mib, 1, false)
+	monitor := pickAgentMemoryLimit(512*mib, 1, false)
+	if got <= monitor || got >= 512*mib {
+		t.Fatalf("proxy %d monitor %d", got, monitor)
+	}
+}
+
 func TestShouldSetAutoMemoryLimit(t *testing.T) {
 	const mib = int64(1 << 20)
 	cases := []struct {
@@ -114,7 +123,12 @@ func TestShouldSetAutoMemoryLimit(t *testing.T) {
 		{0, false},
 		{256 * mib, true},
 		{512 * mib, true},
-		{899 * mib, true},
+		{513 * mib, false},
+		{640 * mib, false},
+		{767 * mib, false},
+		{768 * mib, false},
+		{891 * mib, false},
+		{899 * mib, false},
 		{900 * mib, false},
 		{960 * mib, false},
 		{1024 * mib, false},
@@ -202,6 +216,49 @@ func TestConfigureRuntimeMemoryDefault(t *testing.T) {
 	}
 }
 
+func TestConfigureRuntimeMemorySkipsAbove512(t *testing.T) {
+	t.Setenv("AGENT_MEMORY_RELEASE_INTERVAL", "0")
+	if err := os.Unsetenv("GOMEMLIMIT"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Unsetenv("GOGC"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Unsetenv("GOMAXPROCS"); err != nil {
+		t.Fatal(err)
+	}
+	prevBudget, prevCPUs := memoryBudget, effectiveCPUs
+	memoryBudget = func() (int64, bool) { return 640 << 20, false }
+	effectiveCPUs = func() int { return 1 }
+	t.Cleanup(func() {
+		memoryBudget = prevBudget
+		effectiveCPUs = prevCPUs
+		_ = os.Unsetenv("GOMEMLIMIT")
+		_ = os.Unsetenv("GOGC")
+		_ = os.Unsetenv("GOMAXPROCS")
+	})
+
+	prevLimit := debug.SetMemoryLimit(math.MaxInt64)
+	prevGC := debug.SetGCPercent(100)
+	prevMax := runtime.GOMAXPROCS(0)
+	t.Cleanup(func() {
+		debug.SetMemoryLimit(prevLimit)
+		debug.SetGCPercent(prevGC)
+		runtime.GOMAXPROCS(prevMax)
+	})
+
+	configureRuntimeMemory()
+
+	gotLimit := debug.SetMemoryLimit(math.MaxInt64)
+	if gotLimit != math.MaxInt64 {
+		t.Fatalf(">512MiB host should skip auto GOMEMLIMIT, got %d", gotLimit)
+	}
+	gotGC := debug.SetGCPercent(50)
+	if gotGC != 50 {
+		t.Fatalf("GOGC = %d, want 50", gotGC)
+	}
+}
+
 func TestConfigureRuntimeMemorySkipsLargeHost(t *testing.T) {
 	t.Setenv("AGENT_MEMORY_RELEASE_INTERVAL", "0")
 	if err := os.Unsetenv("GOMEMLIMIT"); err != nil {
@@ -273,5 +330,100 @@ func TestConfigureRuntimeMemoryRespectsEnv(t *testing.T) {
 	}
 	if runtime.GOMAXPROCS(0) != prevMax {
 		t.Fatalf("GOMAXPROCS env should skip override, got %d want %d", runtime.GOMAXPROCS(0), prevMax)
+	}
+}
+
+func TestSetProxyMemoryModeLifts512Cap(t *testing.T) {
+	t.Setenv("AGENT_MEMORY_RELEASE_INTERVAL", "0")
+	if err := os.Unsetenv("GOMEMLIMIT"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Unsetenv("GOGC"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Unsetenv("GOMAXPROCS"); err != nil {
+		t.Fatal(err)
+	}
+	prevBudget, prevCPUs := memoryBudget, effectiveCPUs
+	memoryBudget = func() (int64, bool) { return 512 << 20, false }
+	effectiveCPUs = func() int { return 1 }
+	t.Cleanup(func() {
+		memoryBudget = prevBudget
+		effectiveCPUs = prevCPUs
+		_ = os.Unsetenv("GOMEMLIMIT")
+		_ = os.Unsetenv("GOGC")
+		_ = os.Unsetenv("GOMAXPROCS")
+	})
+
+	prevLimit := debug.SetMemoryLimit(math.MaxInt64)
+	prevGC := debug.SetGCPercent(100)
+	t.Cleanup(func() {
+		debug.SetMemoryLimit(prevLimit)
+		debug.SetGCPercent(prevGC)
+	})
+
+	configureRuntimeMemory()
+	want := pickAgentMemoryLimit(512<<20, 1, false)
+	if got := debug.SetMemoryLimit(want); got != want {
+		t.Fatalf("512 monitoring cap = %d, want %d", got, want)
+	}
+
+	lifted := pickProxyMemoryLimit(512<<20, 1, false)
+	if lifted <= want || lifted >= 512<<20 {
+		t.Fatalf("proxy cap %d must sit between monitor %d and host 512MiB", lifted, want)
+	}
+	setProxyMemoryMode(true)
+	if got := debug.SetMemoryLimit(lifted); got != lifted {
+		t.Fatalf("live inbounds should lift 512 cap to %d, got %d", lifted, got)
+	}
+	setProxyMemoryMode(true)
+	if got := debug.SetMemoryLimit(lifted); got != lifted {
+		t.Fatalf("lifting twice should keep proxy cap %d, got %d", lifted, got)
+	}
+
+	setProxyMemoryMode(false)
+	if got := debug.SetMemoryLimit(want); got != want {
+		t.Fatalf("no inbounds should restore 512 cap %d, got %d", want, got)
+	}
+}
+
+func TestSetProxyMemoryModeRespectsEnv(t *testing.T) {
+	t.Setenv("AGENT_MEMORY_RELEASE_INTERVAL", "0")
+	t.Setenv("GOMEMLIMIT", "256MiB")
+	const keepLimit int64 = 123 << 20
+	prevLimit := debug.SetMemoryLimit(keepLimit)
+	t.Cleanup(func() {
+		debug.SetMemoryLimit(prevLimit)
+	})
+
+	configureRuntimeMemory()
+	setProxyMemoryMode(true)
+	if got := debug.SetMemoryLimit(keepLimit); got != keepLimit {
+		t.Fatalf("GOMEMLIMIT env should keep %d, got %d", keepLimit, got)
+	}
+}
+
+func TestSetProxyMemoryModeNoopWhenHostSkips(t *testing.T) {
+	t.Setenv("AGENT_MEMORY_RELEASE_INTERVAL", "0")
+	if err := os.Unsetenv("GOMEMLIMIT"); err != nil {
+		t.Fatal(err)
+	}
+	prevBudget, prevCPUs := memoryBudget, effectiveCPUs
+	memoryBudget = func() (int64, bool) { return 960 << 20, false }
+	effectiveCPUs = func() int { return 1 }
+	t.Cleanup(func() {
+		memoryBudget = prevBudget
+		effectiveCPUs = prevCPUs
+	})
+
+	prevLimit := debug.SetMemoryLimit(math.MaxInt64)
+	t.Cleanup(func() {
+		debug.SetMemoryLimit(prevLimit)
+	})
+
+	configureRuntimeMemory()
+	setProxyMemoryMode(true)
+	if got := debug.SetMemoryLimit(math.MaxInt64); got != math.MaxInt64 {
+		t.Fatalf("skipped host should stay unlimited, got %d", got)
 	}
 }

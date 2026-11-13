@@ -59,6 +59,12 @@ func (c *singBoxCore) Name() string    { return "sing-box" }
 func (c *singBoxCore) Version() string { return SingBoxVersion }
 func (c *singBoxCore) Linked() bool    { return true }
 
+func (c *singBoxCore) LiveInbounds() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.inst != nil
+}
+
 func (c *singBoxCore) Start(_ context.Context, inbounds []InboundSpec) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -428,7 +434,7 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 		applySingBoxUDPFragment(item, in)
 		listenHosts := []string{listenAddr}
 		if public {
-			listenHosts = publicCoreListenHosts(hosts, "tcp4")
+			listenHosts = publicListenHostsForProtocol(hosts, inboundListensTCP(in), inboundListensUDP(in))
 		}
 		for hi, host := range listenHosts {
 			cloned := cloneAnyMap(item)
@@ -1010,6 +1016,17 @@ func inboundListensUDP(in InboundSpec) bool {
 		return ssListenNetwork(in) != "tcp"
 	default:
 		return false
+	}
+}
+
+func inboundListensTCP(in InboundSpec) bool {
+	switch strings.ToLower(strings.TrimSpace(in.Protocol)) {
+	case "hysteria2", "tuic":
+		return false
+	case "shadowsocks":
+		return ssListenNetwork(in) != "udp"
+	default:
+		return true
 	}
 }
 

@@ -131,6 +131,17 @@ func TestFirewallBootScriptLoadsNftAndIptables(t *testing.T) {
 	if !strings.Contains(script, "lite-plus:") {
 		t.Fatal("boot must remove previous plus accepts from inet input")
 	}
+	if !strings.Contains(script, `while [ "$n" -lt 5 ]; do`) || !strings.Contains(script, `nft -f "$PROT_FILE"`) {
+		t.Fatal("boot must retry loading the protection table before giving up")
+	}
+	loadStart := strings.Index(script, "load_prot() {")
+	loadFile := strings.Index(script, `nft -f "$PROT_FILE"`)
+	if loadStart < 0 || loadFile < 0 || loadStart > loadFile {
+		t.Fatal("boot must load the protection table with nft -f")
+	}
+	if strings.Contains(script[loadStart:loadFile], "nft delete table") {
+		t.Fatal("boot must not delete liteplus_protection outside nft -f; a failed add would leave a gap")
+	}
 }
 
 func TestNftAttachScriptFlushesBeforeRules(t *testing.T) {

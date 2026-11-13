@@ -34,6 +34,7 @@ func (*geoLoopCore) Version() string                                       { ret
 func (*geoLoopCore) Linked() bool                                          { return true }
 func (*geoLoopCore) Start(context.Context, []coreadapter.InboundSpec) error { return nil }
 func (*geoLoopCore) Stop() error                                           { return nil }
+func (*geoLoopCore) LiveInbounds() bool                                    { return false }
 func (*geoLoopCore) ApplyUsers([]coreadapter.UserSpec) error               { return nil }
 func (c *geoLoopCore) CloseUserSessions(id string) error {
 	c.closed = append(c.closed, id)

@@ -66,10 +66,10 @@ func isDualWildcardHosts(hosts []string) bool {
 }
 
 // publicCoreListenHosts folds a dual wildcard pair to match a core's
-// listen networks. v4network is "tcp4" (sing-box) or "tcp" (Xray).
-// Bind order matches the cores: 0.0.0.0 first, then ::. If the IPv6
-// socket overlaps IPv4, keep only "::". If IPv6 is missing, keep
-// "0.0.0.0". If they coexist, keep both.
+// listen networks. v4network is "tcp4" (sing-box), "tcp" (Xray TCP),
+// or "udp"/"udp4" (Xray SS UDP). Bind order matches the cores: 0.0.0.0
+// first, then ::. If the IPv6 socket overlaps IPv4, keep only "::".
+// If IPv6 is missing, keep "0.0.0.0". If they coexist, keep both.
 func publicCoreListenHosts(hosts []string, v4network string) []string {
 	if !isDualWildcardHosts(hosts) {
 		return hosts
@@ -84,9 +84,59 @@ func publicCoreListenHosts(hosts []string, v4network string) []string {
 	return hosts
 }
 
+func publicListenHostsForProtocol(hosts []string, tcp, udp bool) []string {
+	switch {
+	case udp && !tcp:
+		return publicCoreListenHosts(hosts, "udp4")
+	case tcp && udp:
+		return intersectListenHosts(
+			publicCoreListenHosts(hosts, "tcp4"),
+			publicCoreListenHosts(hosts, "udp4"),
+		)
+	default:
+		return publicCoreListenHosts(hosts, "tcp4")
+	}
+}
+
+func intersectListenHosts(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	have := make(map[string]struct{}, len(b))
+	for _, host := range b {
+		have[host] = struct{}{}
+	}
+	out := make([]string, 0, len(a))
+	for _, host := range a {
+		if _, ok := have[host]; ok {
+			out = append(out, host)
+		}
+	}
+	if len(out) == 0 {
+		return a
+	}
+	return out
+}
+
 var detectOverlappingWildcard = probeOverlappingWildcard
 
 func probeOverlappingWildcard(v4network string) []string {
+	switch strings.ToLower(strings.TrimSpace(v4network)) {
+	case "udp", "udp4", "udp6":
+		return probeOverlappingPacket("udp4", "udp6")
+	default:
+		network := strings.TrimSpace(v4network)
+		if network == "" {
+			network = "tcp4"
+		}
+		return probeOverlappingStream(network)
+	}
+}
+
+func probeOverlappingStream(v4network string) []string {
 	v4, err := net.Listen(v4network, "0.0.0.0:0")
 	if err != nil {
 		v6, v6err := net.Listen("tcp", "[::]:0")
@@ -99,6 +149,29 @@ func probeOverlappingWildcard(v4network string) []string {
 	defer v4.Close()
 	port := v4.Addr().(*net.TCPAddr).Port
 	v6, err := net.Listen("tcp", net.JoinHostPort("::", strconv.Itoa(port)))
+	if err == nil {
+		_ = v6.Close()
+		return []string{"0.0.0.0", "::"}
+	}
+	if isAddrInUse(err) {
+		return []string{"::"}
+	}
+	return []string{"0.0.0.0"}
+}
+
+func probeOverlappingPacket(v4network, v6network string) []string {
+	v4, err := net.ListenPacket(v4network, "0.0.0.0:0")
+	if err != nil {
+		v6, v6err := net.ListenPacket(v6network, "[::]:0")
+		if v6err == nil {
+			_ = v6.Close()
+			return []string{"::"}
+		}
+		return []string{"0.0.0.0"}
+	}
+	defer v4.Close()
+	port := v4.LocalAddr().(*net.UDPAddr).Port
+	v6, err := net.ListenPacket(v6network, net.JoinHostPort("::", strconv.Itoa(port)))
 	if err == nil {
 		_ = v6.Close()
 		return []string{"0.0.0.0", "::"}
@@ -123,7 +196,7 @@ func isAddrInUse(err error) bool {
 
 func inboundPublicFronts(in InboundSpec, dest, proto string, users []UserSpec, sendProxy bool) []frontSpec {
 	port := fmt.Sprintf("%d", in.Port)
-	hosts := FrontListenHosts(inboundStack(in), in.Listen)
+	hosts := publicListenHostsForProtocol(FrontListenHosts(inboundStack(in), in.Listen), true, false)
 	out := make([]frontSpec, 0, len(hosts))
 	for _, host := range hosts {
 		out = append(out, newFrontSpec(

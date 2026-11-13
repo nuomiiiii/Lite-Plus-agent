@@ -30,7 +30,7 @@ func parseNftInputHooks(raw string) []nftInputHook {
 		if fam == "" || table == "" || chain == "" {
 			continue
 		}
-		if table == plusNftTable {
+		if table == plusNftTable || skipProtectionInetTable(table) {
 			continue
 		}
 		key := fam + "|" + table + "|" + chain
@@ -66,7 +66,7 @@ func parseNftListedTables(raw string) []nftInputHook {
 func inetTablesForWatch(tables []nftInputHook) []nftInputHook {
 	var out []nftInputHook
 	for _, table := range tables {
-		if table.Family != "inet" || table.Table == plusNftTable || skipManagedInetTable(table.Table) {
+		if table.Family != "inet" || table.Table == plusNftTable || skipProtectionInetTable(table.Table) || skipManagedInetTable(table.Table) {
 			continue
 		}
 		out = append(out, table)

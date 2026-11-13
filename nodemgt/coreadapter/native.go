@@ -50,6 +50,10 @@ func (n *Native) Name() string    { return n.name }
 func (n *Native) Version() string { return n.version }
 func (n *Native) Linked() bool    { return n.linked }
 
+func (n *Native) LiveInbounds() bool {
+	return n.ln != nil
+}
+
 func (n *Native) Start(ctx context.Context, inbounds []InboundSpec) error {
 	_ = n.Stop()
 	var spec *InboundSpec

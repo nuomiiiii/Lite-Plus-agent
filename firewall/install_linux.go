@@ -41,6 +41,7 @@ func installNftables() v2.FirewallResultParams {
 		result.Error = "未找到 apt / dnf / yum / zypper / apk / opkg / pacman，请先手动安装 nftables"
 		return result
 	}
+	wasActive, wasEnabled := nftablesServiceState()
 	if steps[0].Name == "apt-get" {
 		restore := suppressServiceStart()
 		defer restore()
@@ -52,7 +53,9 @@ func installNftables() v2.FirewallResultParams {
 			return result
 		}
 	}
-	disableNftablesService()
+	if !wasActive && !wasEnabled {
+		disableNftablesService()
+	}
 	if !lookPath("nft") {
 		result.Status = v2.FirewallStatusError
 		result.Error = "已尝试安装 nftables，但仍找不到 nft 命令"
@@ -66,6 +69,7 @@ func installNftables() v2.FirewallResultParams {
 func disableNftablesService() {
 	if lookPath("systemctl") {
 		_, _ = runCmd(cmdTimeout, "systemctl", "disable", "--now", "nftables")
+		return
 	}
 	if lookPath("rc-service") {
 		_, _ = runCmd(cmdTimeout, "rc-service", "nftables", "stop")

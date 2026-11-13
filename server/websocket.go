@@ -50,6 +50,8 @@ func currentV2PullCapabilities() ([]string, map[string]int) {
 		versions[v2.CapabilityMCPFull] = v2.MCPFullVersion
 		caps = append(caps, v2.CapabilityFirewall)
 		versions[v2.CapabilityFirewall] = v2.FirewallVersion
+		caps = append(caps, v2.CapabilityServiceProtection)
+		versions[v2.CapabilityServiceProtection] = v2.ServiceProtectionVersion
 	}
 	return caps, versions
 }
@@ -80,6 +82,7 @@ func (s *agentWebSocketSession) drop(reason string) {
 		log.Println(reason)
 	}
 	if s.conn != nil {
+		clearLiveWebSocket(s.conn)
 		s.conn.Close()
 		s.conn = nil
 	}
@@ -88,6 +91,7 @@ func (s *agentWebSocketSession) drop(reason string) {
 
 func (s *agentWebSocketSession) attach(conn *ws.SafeConn) {
 	s.conn = conn
+	setLiveWebSocket(conn)
 	done := make(chan struct{})
 	s.readDone = done
 	go handleWebSocketMessages(conn, done)
@@ -552,6 +556,8 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 		return false
 	case v2.MethodAgentFirewallSnapshot, v2.MethodAgentFirewallApply, v2.MethodAgentFirewallAdopt, v2.MethodAgentFirewallInstall:
 		return processFirewallEvent(conn, method, params)
+	case v2.MethodAgentProtectionPrecheck, v2.MethodAgentProtectionUpgrade, v2.MethodAgentProtectionApplyConfig, v2.MethodAgentProtectionBan, v2.MethodAgentProtectionUnban, v2.MethodAgentProtectionGroupSnapshot, v2.MethodAgentProtectionPreview:
+		return processProtectionEvent(conn, method, params)
 	case v2.MethodAgentMessage, v2.MethodAgentEvent:
 		log.Printf("received v2 %s: %+v", method, params)
 		return true

@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -115,8 +116,9 @@ type egressHop struct {
 }
 
 var (
-	hopTLSMu      sync.Mutex
-	hopTLSRootCAs *x509.CertPool
+	hopTLSMu            sync.Mutex
+	hopTLSRootCAs       *x509.CertPool
+	spliceHalfCloseWait = 5 * time.Second
 )
 
 type frontSpec struct {
@@ -1254,10 +1256,73 @@ func serveSplice(front *spliceFront, spec frontSpec) {
 					return
 				}
 			}
-			go io.Copy(backend, client)
-			io.Copy(client, backend)
+			spliceHalfClose(client, backend)
 		})
 	}
+}
+
+func closeWrite(c net.Conn) {
+	if c == nil {
+		return
+	}
+	type closeWriter interface {
+		CloseWrite() error
+	}
+	if cw, ok := c.(closeWriter); ok {
+		_ = cw.CloseWrite()
+	}
+}
+
+func spliceHalfClose(client, backend net.Conn) {
+	wait := spliceHalfCloseWait
+	var idleUp, idleDown atomic.Int64
+	upDone := make(chan struct{})
+	downDone := make(chan struct{})
+	go func() {
+		defer close(upDone)
+		copyIdle(backend, client, &idleUp)
+		closeWrite(backend)
+		armSpliceIdle(backend, &idleDown, wait)
+	}()
+	go func() {
+		defer close(downDone)
+		copyIdle(client, backend, &idleDown)
+		closeWrite(client)
+		armSpliceIdle(client, &idleUp, wait)
+	}()
+	<-upDone
+	<-downDone
+}
+
+func copyIdle(dst, src net.Conn, idle *atomic.Int64) {
+	buf := make([]byte, 32*1024)
+	for {
+		if d := time.Duration(idle.Load()); d > 0 {
+			_ = src.SetReadDeadline(time.Now().Add(d))
+		}
+		n, err := src.Read(buf)
+		if n > 0 {
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func armSpliceIdle(src net.Conn, idle *atomic.Int64, wait time.Duration) {
+	if src == nil {
+		return
+	}
+	if wait <= 0 {
+		_ = src.SetReadDeadline(time.Now())
+		idle.Store(1)
+		return
+	}
+	idle.Store(wait.Nanoseconds())
+	_ = src.SetReadDeadline(time.Now().Add(wait))
 }
 
 func serveIdentitySplice(front *spliceFront, dest string, policy *policyEngine) {

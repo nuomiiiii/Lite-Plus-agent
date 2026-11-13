@@ -33,6 +33,54 @@ func TestLinkedCoresReportVersions(t *testing.T) {
 	}
 }
 
+func TestLiveInboundsSurvivesFailedRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		core Core
+	}{
+		{"xray", NewXray()},
+		{"sing-box", NewSingBox()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core := tc.core
+			defer core.Stop()
+			port := freePort(t)
+			if err := core.ApplyUsers([]UserSpec{{ID: "u1", UUID: "alice", Password: "pw"}}); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			if err := core.Start(ctx, []InboundSpec{{
+				ID: "socks", Core: tc.name, Listen: "127.0.0.1", Port: port, Protocol: "socks",
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			if !core.LiveInbounds() {
+				t.Fatal("expected live after start")
+			}
+			block, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer block.Close()
+			badPort := block.Addr().(*net.TCPAddr).Port
+			if err := core.Start(ctx, []InboundSpec{{
+				ID: "socks", Core: tc.name, Listen: "127.0.0.1", Port: badPort, Protocol: "socks",
+			}}); err == nil {
+				t.Fatal("want bind failure")
+			}
+			if !core.LiveInbounds() {
+				t.Fatal("restored last-good must still count as live")
+			}
+			if err := core.Start(ctx, nil); err != nil {
+				t.Fatal(err)
+			}
+			if core.LiveInbounds() {
+				t.Fatal("empty start must drop live inbounds")
+			}
+		})
+	}
+}
+
 func TestDualCoreSOCKSPersonalControl(t *testing.T) {
 	echo := startEcho(t)
 	defer echo.Close()
@@ -281,6 +329,69 @@ func TestDualCoreSS2022PersonalControl(t *testing.T) {
 				t.Fatalf("echo %q", got)
 			}
 		})
+	}
+}
+
+func TestXraySS2022ClientFINReaps(t *testing.T) {
+	old := spliceHalfCloseWait
+	spliceHalfCloseWait = 200 * time.Millisecond
+	defer func() { spliceHalfCloseWait = old }()
+
+	echo := startEcho(t)
+	defer echo.Close()
+	method := "2022-blake3-aes-128-gcm"
+	serverKey := ss2022Key("ss-server:ss1", method)
+	users := []UserSpec{{
+		ID: "u1", UUID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", Password: "pw1", QuotaBytes: 1 << 20,
+	}}
+	settings := fmt.Sprintf(`{"ss_method":%q,"ss_password":%q}`, method, serverKey)
+	clientPass := serverKey + ":" + ss2022Key("pw1", method)
+	core := NewXray()
+	defer core.Stop()
+	port := freePort(t)
+	if err := core.ApplyUsers(users); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.Start(context.Background(), []InboundSpec{{
+		ID: "ss1", Core: "xray", Listen: "127.0.0.1", Port: port, Protocol: "shadowsocks",
+		SettingsJSON: settings,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	waitProxy(t, addr)
+
+	raw, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	_ = raw.SetDeadline(time.Now().Add(3 * time.Second))
+	m, err := shadowaead_2022.NewWithPassword(method, clientPass, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := m.DialConn(raw, M.ParseSocksaddr(echo.Addr().String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("fin-reap")
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != string(payload) {
+		t.Fatalf("echo %q", buf)
+	}
+	if err := raw.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	n, err := raw.Read(make([]byte, 8))
+	if n != 0 || err != io.EOF {
+		t.Fatalf("want EOF after client FIN, n=%d err=%v", n, err)
 	}
 }
 

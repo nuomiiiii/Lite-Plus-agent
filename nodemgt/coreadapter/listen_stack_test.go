@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -79,8 +80,53 @@ func TestPublicCoreListenHosts(t *testing.T) {
 	}
 }
 
+func TestInboundPublicFrontsProbesOverlap(t *testing.T) {
+	orig := detectOverlappingWildcard
+	t.Cleanup(func() { detectOverlappingWildcard = orig })
+	detectOverlappingWildcard = func(network string) []string {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(network)), "udp") {
+			return []string{"::"}
+		}
+		return []string{"::"}
+	}
+	fronts := inboundPublicFronts(InboundSpec{Port: 443, SettingsJSON: `{"stack":"dual"}`}, "127.0.0.1:9", "shadowsocks", nil, true)
+	if len(fronts) != 1 || !strings.Contains(fronts[0].Addr, "::") {
+		t.Fatalf("overlap probe fronts %+v", fronts)
+	}
+}
+
+func TestPublicListenHostsForProtocol(t *testing.T) {
+	orig := detectOverlappingWildcard
+	t.Cleanup(func() { detectOverlappingWildcard = orig })
+	detectOverlappingWildcard = func(network string) []string {
+		switch strings.ToLower(strings.TrimSpace(network)) {
+		case "udp", "udp4", "udp6":
+			return []string{"::"}
+		default:
+			return []string{"0.0.0.0", "::"}
+		}
+	}
+	hosts := []string{"0.0.0.0", "::"}
+	got := publicListenHostsForProtocol(hosts, true, false)
+	if !sameStrings(got, hosts) {
+		t.Fatalf("tcp-only %v", got)
+	}
+	got = publicListenHostsForProtocol(hosts, false, true)
+	if len(got) != 1 || got[0] != "::" {
+		t.Fatalf("udp-only %v", got)
+	}
+	got = publicListenHostsForProtocol(hosts, true, true)
+	if len(got) != 1 || got[0] != "::" {
+		t.Fatalf("tcp+udp intersection %v", got)
+	}
+	got = publicListenHostsForProtocol([]string{"192.0.2.8"}, false, true)
+	if len(got) != 1 || got[0] != "192.0.2.8" {
+		t.Fatalf("explicit udp %v", got)
+	}
+}
+
 func TestProbeOverlappingWildcard(t *testing.T) {
-	for _, network := range []string{"tcp4", "tcp"} {
+	for _, network := range []string{"tcp4", "tcp", "udp", "udp4"} {
 		got := probeOverlappingWildcard(network)
 		switch {
 		case len(got) == 1 && (got[0] == "::" || got[0] == "0.0.0.0"):

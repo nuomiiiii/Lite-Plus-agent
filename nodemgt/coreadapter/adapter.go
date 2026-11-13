@@ -85,6 +85,10 @@ type Core interface {
 	TakeSnapshots() []Snapshot
 	AcknowledgeUsage()
 	Presence() []Presence
+	// LiveInbounds reports whether this core currently has a running instance.
+	// Start may still return an error after restoreLastGood brings the previous
+	// inbounds back; the memory hook must follow this, not the Start result.
+	LiveInbounds() bool
 }
 
 func All() []Core {

@@ -115,6 +115,7 @@ func Apply(intent v2.FirewallIntent, holes []v2.FirewallHole) v2.FirewallResultP
 		return result
 	}
 	_ = persistBootLocked(eng, intent, holes)
+	_ = RestoreProtectionLocked()
 	live := withStacks(eng.snapshot())
 	live.Kind = v2.FirewallKindApply
 	live.Status = v2.FirewallStatusOK
@@ -294,7 +295,7 @@ func RestorePersisted() error {
 func restorePersistedLocked() error {
 	state := loadPersist()
 	if state == nil {
-		return nil
+		return RestoreProtectionLocked()
 	}
 	v2.UnifyPairedPolicy(&state.Intent)
 	lastWindowsPolicy = state.WindowsPolicy
@@ -313,7 +314,10 @@ func restorePersistedLocked() error {
 		return err
 	}
 	_ = persistApplied(state.Intent, holes, eng.name())
-	return persistBootLocked(eng, state.Intent, holes)
+	if err := persistBootLocked(eng, state.Intent, holes); err != nil {
+		return err
+	}
+	return RestoreProtectionLocked()
 }
 
 func holesFromIntent(intent v2.FirewallIntent) []v2.FirewallHole {

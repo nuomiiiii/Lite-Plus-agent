@@ -121,6 +121,14 @@ func ssListenNetwork(in InboundSpec) string {
 	return normalizeSSNetwork(settingString(in.SettingsJSON, "ss_network"))
 }
 
+func ssWantsTCP(in InboundSpec) bool {
+	return ssListenNetwork(in) != "udp"
+}
+
+func ssWantsUDP(in InboundSpec) bool {
+	return ssListenNetwork(in) != "tcp"
+}
+
 func ssOutboundNetwork(settings map[string]any) string {
 	if settings == nil {
 		return "tcp,udp"

@@ -33,34 +33,38 @@ func ensureStacks() error {
 	opMu.Lock()
 	defer opMu.Unlock()
 	state := loadPersist()
-	if state == nil || intentIdle(state.Intent) {
-		return nil
+	staticIdle := state == nil || intentIdle(state.Intent)
+	if staticIdle {
+		return restoreProtectionIfNeeded()
 	}
 	if !stacksChangedSincePersist() {
-		return nil
+		return restoreProtectionIfNeeded()
 	}
 	log.Printf("firewall host stacks changed; restoring plus rules onto the new stack")
-	return restorePersistedLocked()
+	if err := restorePersistedLocked(); err != nil {
+		return err
+	}
+	return RestoreProtectionLocked()
 }
 
 func ensureOwned() error {
 	opMu.Lock()
 	defer opMu.Unlock()
 	state := loadPersist()
-	if state == nil || intentIdle(state.Intent) {
-		return nil
+	staticIdle := state == nil || intentIdle(state.Intent)
+	if !staticIdle && watchReady() {
+		stale, live := probeOwnedWatch()
+		if stale {
+			log.Printf("firewall plus table is on the wrong hook; moving allow ports onto the host INPUT")
+			if err := restorePersistedLocked(); err != nil {
+				return err
+			}
+		} else if !live {
+			log.Printf("firewall owned rules missing; restoring all plus allow ports")
+			if err := restorePersistedLocked(); err != nil {
+				return err
+			}
+		}
 	}
-	if !watchReady() {
-		return nil
-	}
-	stale, live := probeOwnedWatch()
-	if stale {
-		log.Printf("firewall plus table is on the wrong hook; moving allow ports onto the host INPUT")
-		return restorePersistedLocked()
-	}
-	if live {
-		return nil
-	}
-	log.Printf("firewall owned rules missing; restoring all plus allow ports")
-	return restorePersistedLocked()
+	return restoreProtectionIfNeeded()
 }

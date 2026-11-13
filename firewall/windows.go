@@ -325,4 +325,3 @@ func windowsPingBlocked(family int) bool {
 	out, err := runCmd(cmdTimeout, "netsh", "advfirewall", "firewall", "show", "rule", "name="+name)
 	return err == nil && strings.Contains(strings.ToLower(out), "enabled") && strings.Contains(strings.ToLower(out), "yes")
 }
-

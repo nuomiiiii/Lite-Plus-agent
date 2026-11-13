@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"net"
 	"sync"
 	"time"
 
@@ -37,6 +38,16 @@ func (sc *SafeConn) WriteJSON(v interface{}) error {
 		return err
 	}
 	return sc.conn.WriteJSON(v)
+}
+
+func (sc *SafeConn) RemoteAddr() net.Addr {
+	if sc == nil || sc.conn == nil {
+		return nil
+	}
+	if netConn := sc.conn.NetConn(); netConn != nil && netConn.RemoteAddr() != nil {
+		return netConn.RemoteAddr()
+	}
+	return sc.conn.RemoteAddr()
 }
 
 func (sc *SafeConn) Close() error {

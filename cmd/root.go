@@ -19,6 +19,7 @@ import (
 	"github.com/nuomiiiii/lite-agent/dnsresolver"
 	"github.com/nuomiiiii/lite-agent/monitoring/netstatic"
 	monitoring "github.com/nuomiiiii/lite-agent/monitoring/unit"
+	nodemgtruntime "github.com/nuomiiiii/lite-agent/nodemgt/runtime"
 	"github.com/nuomiiiii/lite-agent/relocate"
 	"github.com/nuomiiiii/lite-agent/remotecontrol"
 	"github.com/nuomiiiii/lite-agent/runtimeconfig"
@@ -119,6 +120,7 @@ var RootCmd = &cobra.Command{
 		}
 
 		server.StartTaskRecovery(recoverCtx)
+		nodemgtruntime.SetLiveInboundsHook(setProxyMemoryMode)
 		server.StartNodemgtRuntime(flags.ConfigFile)
 		diskList, err := monitoring.DiskList()
 		if err != nil {

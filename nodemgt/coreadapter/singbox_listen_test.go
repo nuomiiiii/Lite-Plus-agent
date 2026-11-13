@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -145,5 +147,19 @@ func assertWildcardUDPHeld(t *testing.T, port int, hosts []string) {
 			_ = conn.Close()
 			t.Fatalf("udp %d still free after start (%v)", port, hosts)
 		}
+	}
+}
+
+func TestSingBoxPublicUDPListenUsesPacketProbe(t *testing.T) {
+	raw, err := os.ReadFile("singbox_linked.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, "publicListenHostsForProtocol(hosts, inboundListensTCP(in), inboundListensUDP(in))") {
+		t.Fatal("public sing-box UDP inbounds must probe UDP overlap, not tcp4")
+	}
+	if strings.Contains(text, `publicCoreListenHosts(hosts, "tcp4")`) {
+		t.Fatal("sing-box public listen hosts still hardcode tcp4")
 	}
 }

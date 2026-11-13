@@ -8,59 +8,59 @@ import (
 
 func TestPlusRulesStaleDecision(t *testing.T) {
 	tests := []struct {
-		name          string
-		kind          string
-		leftoverPlus  bool
-		hostOwns      bool
-		iptablesLive  bool
-		hasInetHooks  bool
-		inetJumpLive  bool
-		want          bool
+		name         string
+		kind         string
+		leftoverPlus bool
+		hostOwns     bool
+		iptablesLive bool
+		hasInetHooks bool
+		inetJumpLive bool
+		want         bool
 	}{
 		{
-			name: "ufw host input is not a missing plus jump",
-			kind: v2.FirewallBackendUFW,
+			name:     "ufw host input is not a missing plus jump",
+			kind:     v2.FirewallBackendUFW,
 			hostOwns: true,
-			want: false,
+			want:     false,
 		},
 		{
-			name: "ufw with inet filter missing plus jump is stale",
-			kind: v2.FirewallBackendUFW,
+			name:         "ufw with inet filter missing plus jump is stale",
+			kind:         v2.FirewallBackendUFW,
 			hasInetHooks: true,
-			want: true,
+			want:         true,
 		},
 		{
-			name: "ufw with inet filter plus jump is live",
-			kind: v2.FirewallBackendUFW,
+			name:         "ufw with inet filter plus jump is live",
+			kind:         v2.FirewallBackendUFW,
 			hasInetHooks: true,
 			inetJumpLive: true,
-			want: false,
+			want:         false,
 		},
 		{
-			name: "ufw still moves off a leftover plus table",
-			kind: v2.FirewallBackendUFW,
+			name:         "ufw still moves off a leftover plus table",
+			kind:         v2.FirewallBackendUFW,
 			leftoverPlus: true,
-			hostOwns: true,
-			want: true,
+			hostOwns:     true,
+			want:         true,
 		},
 		{
-			name: "iptables host without plus jump is stale",
-			kind: v2.FirewallBackendIptables,
+			name:     "iptables host without plus jump is stale",
+			kind:     v2.FirewallBackendIptables,
 			hostOwns: true,
-			want: true,
+			want:     true,
 		},
 		{
-			name: "iptables host with plus jump is live",
-			kind: v2.FirewallBackendIptables,
-			hostOwns: true,
+			name:         "iptables host with plus jump is live",
+			kind:         v2.FirewallBackendIptables,
+			hostOwns:     true,
 			iptablesLive: true,
-			want: false,
+			want:         false,
 		},
 		{
-			name: "firewalld missing plus jump is stale",
-			kind: v2.FirewallBackendFirewalld,
+			name:     "firewalld missing plus jump is stale",
+			kind:     v2.FirewallBackendFirewalld,
 			hostOwns: true,
-			want: true,
+			want:     true,
 		},
 		{
 			name: "firewalld nft backend without iptables jump is not stale",
@@ -68,33 +68,33 @@ func TestPlusRulesStaleDecision(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "firewalld leftover plus table is stale",
-			kind: v2.FirewallBackendFirewalld,
+			name:         "firewalld leftover plus table is stale",
+			kind:         v2.FirewallBackendFirewalld,
 			leftoverPlus: true,
-			hostOwns: true,
+			hostOwns:     true,
 			iptablesLive: true,
-			want: true,
+			want:         true,
 		},
 		{
-			name: "nft inet input without plus jump is stale",
-			kind: v2.FirewallBackendNFT,
+			name:         "nft inet input without plus jump is stale",
+			kind:         v2.FirewallBackendNFT,
 			hasInetHooks: true,
-			want: true,
+			want:         true,
 		},
 		{
-			name: "nft inet input with plus jump is live",
-			kind: v2.FirewallBackendNFT,
+			name:         "nft inet input with plus jump is live",
+			kind:         v2.FirewallBackendNFT,
 			hasInetHooks: true,
 			inetJumpLive: true,
-			want: false,
+			want:         false,
 		},
 		{
-			name: "nft inet input with leftover plus table is stale",
-			kind: v2.FirewallBackendNFT,
+			name:         "nft inet input with leftover plus table is stale",
+			kind:         v2.FirewallBackendNFT,
 			leftoverPlus: true,
 			hasInetHooks: true,
 			inetJumpLive: true,
-			want: true,
+			want:         true,
 		},
 	}
 	for _, tt := range tests {

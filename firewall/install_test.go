@@ -15,11 +15,22 @@ func TestNftablesInstallDoesNotEnableDistroService(t *testing.T) {
 	if !strings.Contains(text, `"systemctl", "disable", "--now", "nftables"`) {
 		t.Fatal("installing nftables must disable distro nftables.service so its policy drop cannot shadow Plus allows")
 	}
+	if !strings.Contains(text, "nftablesServiceState(") || !strings.Contains(text, "wasActive") {
+		t.Fatal("installing nftables must record an already-running nftables.service and not disable it unconditionally")
+	}
 	if !strings.Contains(text, "suppressServiceStart(") || !strings.Contains(text, "policy-rc.d") {
 		t.Fatal("Debian apt install must block nftables.service from starting mid-install")
 	}
-	if strings.Contains(text, `"enable"`) {
+	if strings.Contains(text, `"enable"`) && !strings.Contains(text, "is-enabled") {
 		t.Fatal("installing nftables must not enable nftables.service")
+	}
+	prot, err := os.ReadFile("protection_linux.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := string(prot)
+	if !strings.Contains(update, "hadNft := lookPath(\"nft\")") || !strings.Contains(update, "!hadNft && !wasActive && !wasEnabled") {
+		t.Fatal("updating nftables on a host that already has nft must not disable nftables.service")
 	}
 }
 

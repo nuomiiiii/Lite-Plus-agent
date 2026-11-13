@@ -11,6 +11,30 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func TestRemoteAddrUsesUnderlyingNetConn(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		conn, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(writer, request, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		time.Sleep(time.Second)
+	}))
+	t.Cleanup(server.Close)
+
+	raw, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := NewSafeConn(raw)
+	defer conn.Close()
+
+	addr := conn.RemoteAddr()
+	if addr == nil || addr.String() == "" {
+		t.Fatal("SafeConn must expose the websocket remote address")
+	}
+}
+
 func TestWriteMessageTimesOutWhenPeerStopsReading(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		conn, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(writer, request, nil)

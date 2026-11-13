@@ -121,6 +121,28 @@ func Start(configFile string, result func(method string, params any)) (*Runtime,
 	return rt, nil
 }
 
+var liveInboundsHook atomic.Value
+
+func SetLiveInboundsHook(fn func(bool)) {
+	liveInboundsHook.Store(fn)
+}
+
+func notifyLiveInbounds(live bool) {
+	v := liveInboundsHook.Load()
+	if fn, ok := v.(func(bool)); ok && fn != nil {
+		fn(live)
+	}
+}
+
+func coresHaveLiveInbounds(cores []coreadapter.Core) bool {
+	for _, core := range cores {
+		if core != nil && core.LiveInbounds() {
+			return true
+		}
+	}
+	return false
+}
+
 func Current() *Runtime { return global }
 
 func (r *Runtime) SetSender(fn func(method string, params any) error) {
@@ -486,6 +508,7 @@ func (r *Runtime) applySnapshot(payload json.RawMessage, keepDeny bool) error {
 			}
 		}
 	}
+	notifyLiveInbounds(coresHaveLiveInbounds(r.cores))
 	if firstErr != nil {
 		return firstErr
 	}

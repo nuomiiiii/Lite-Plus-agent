@@ -69,6 +69,9 @@ func TestHandleWebSocketAdvertisesPullAfterConnect(t *testing.T) {
 	if !bytes.Contains(source, []byte("if message.Method == \"\"")) {
 		t.Fatal("websocket read loop must ignore pull RPC responses without a method")
 	}
+	if !bytes.Contains(source, []byte("setLiveWebSocket(conn)")) || !bytes.Contains(source, []byte("clearLiveWebSocket(s.conn)")) {
+		t.Fatal("websocket session must publish the live peer for firewall watchdog")
+	}
 }
 
 func TestV2PullAdvertisesMCPFullOnlyWhenRemoteControlEnabled(t *testing.T) {
@@ -78,7 +81,7 @@ func TestV2PullAdvertisesMCPFullOnlyWhenRemoteControlEnabled(t *testing.T) {
 	pkg_flags.GlobalConfig.RemoteControlEnabled = false
 	caps, versions := currentV2PullCapabilities()
 	for _, capability := range caps {
-		if capability == "mcp_full" || capability == "firewall" {
+		if capability == "mcp_full" || capability == "firewall" || capability == "service_protection" {
 			t.Fatal("disabled remote control must not advertise " + capability)
 		}
 	}
@@ -113,6 +116,19 @@ func TestV2PullAdvertisesMCPFullOnlyWhenRemoteControlEnabled(t *testing.T) {
 	}
 	if versions["firewall"] != 1 {
 		t.Fatalf("firewall version = %d, want 1", versions["firewall"])
+	}
+	foundProtection := false
+	for _, capability := range caps {
+		if capability == "service_protection" {
+			foundProtection = true
+			break
+		}
+	}
+	if !foundProtection {
+		t.Fatalf("enabled remote control must advertise service_protection: %v", caps)
+	}
+	if versions["service_protection"] != 1 {
+		t.Fatalf("service_protection version = %d, want 1", versions["service_protection"])
 	}
 }
 

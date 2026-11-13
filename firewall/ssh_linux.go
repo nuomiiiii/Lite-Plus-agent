@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	linuxSSHConfig   = "/etc/ssh/sshd_config"
+	linuxSSHConfig    = "/etc/ssh/sshd_config"
 	linuxSSHDropinDir = "/etc/ssh/sshd_config.d"
 )
 

@@ -2,20 +2,66 @@ package server
 
 import (
 	"log"
+	"sync"
+	"time"
 
 	"github.com/nuomiiiii/lite-agent/firewall"
 	v2 "github.com/nuomiiiii/lite-agent/protocol/v2"
 	"github.com/nuomiiiii/lite-agent/ws"
 )
 
+var (
+	liveWSMu sync.Mutex
+	liveWS   *ws.SafeConn
+)
+
+func setLiveWebSocket(conn *ws.SafeConn) {
+	liveWSMu.Lock()
+	liveWS = conn
+	liveWSMu.Unlock()
+}
+
+func clearLiveWebSocket(conn *ws.SafeConn) {
+	liveWSMu.Lock()
+	if liveWS == conn {
+		liveWS = nil
+	}
+	liveWSMu.Unlock()
+}
+
+func liveControlPlanePeer() string {
+	liveWSMu.Lock()
+	conn := liveWS
+	liveWSMu.Unlock()
+	if conn == nil {
+		return ""
+	}
+	addr := conn.RemoteAddr()
+	if addr == nil {
+		return ""
+	}
+	return addr.String()
+}
+
 func RestorePersistedFirewall() {
+	firewall.SetControlPlanePeer(liveControlPlanePeer)
 	if err := firewall.RestorePersisted(); err != nil {
 		log.Printf("firewall restore: %v", err)
 	}
 }
 
 func WatchPersistedFirewall() {
+	firewall.SetControlPlanePeer(liveControlPlanePeer)
+	go flushProtectionReportsLoop()
 	firewall.WatchOwned()
+}
+
+func flushProtectionReportsLoop() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		FlushProtectionReports(nil)
+	}
 }
 
 func processFirewallEvent(conn *ws.SafeConn, method string, params interface{}) bool {

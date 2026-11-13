@@ -198,12 +198,45 @@ func TestXraySSInboundStackListen(t *testing.T) {
 		ID: "ss1", Listen: "::", Port: 8388, Protocol: "shadowsocks",
 		SettingsJSON: `{"ss_method":"aes-128-gcm","stack":"ipv6"}`,
 	}}
-	raw, _, _, err := c.buildConfig(c.users, c.inbounds, nil, nil)
+	raw, _, fronts, err := c.buildConfig(c.users, c.inbounds, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := xrayInboundListen(raw, "ss1"); got != "::" {
-		t.Fatalf("xray ss ipv6 listen=%q in %s", got, raw)
+	if got := xrayInboundListen(raw, "ss1"); got != "127.0.0.1" {
+		t.Fatalf("xray ss tcp loopback listen=%q in %s", got, raw)
+	}
+	if got := xrayInboundListen(raw, "ss1-udp"); got != "::" {
+		t.Fatalf("xray ss ipv6 udp listen=%q in %s", got, raw)
+	}
+	if len(fronts) == 0 {
+		t.Fatal("xray ss tcp must be fronted")
+	}
+}
+
+func TestXraySSUDPRoundTrip(t *testing.T) {
+	udpEcho := startUDPEcho(t)
+	defer udpEcho.Close()
+	core := NewXray()
+	defer core.Stop()
+	port := freePort(t)
+	if err := core.ApplyUsers([]UserSpec{{ID: "u1", UUID: vlessAlice, Password: "pw1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.Start(context.Background(), []InboundSpec{{
+		ID: "ss1", Core: "xray", Listen: "127.0.0.1", Port: port, Protocol: "shadowsocks",
+		SettingsJSON: `{"ss_method":"aes-128-gcm"}`,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	waitProxy(t, addr)
+	payload := []byte("ss-udp-core")
+	got, err := ssUDPRoundTrip(addr, "aes-128-gcm", "pw1", udpEcho.LocalAddr().String(), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("udp echo %q", got)
 	}
 }
 

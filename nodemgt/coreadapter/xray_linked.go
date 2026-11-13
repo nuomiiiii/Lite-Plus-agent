@@ -59,6 +59,12 @@ func (c *xrayCore) Name() string    { return "xray" }
 func (c *xrayCore) Version() string { return XrayVersion }
 func (c *xrayCore) Linked() bool    { return true }
 
+func (c *xrayCore) LiveInbounds() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.inst != nil
+}
+
 func (c *xrayCore) Start(_ context.Context, inbounds []InboundSpec) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -459,6 +465,14 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 		default:
 			continue
 		}
+		if proto == "shadowsocks" {
+			var err error
+			items, meterTags, fronts, err = appendXrayShadowsocks(in, tag, item, users, listenTags, items, meterTags, fronts)
+			if err != nil {
+				return nil, 0, nil, err
+			}
+			continue
+		}
 		for hi, host := range listenHosts {
 			cloned := cloneAnyMap(item)
 			useTag := tag
@@ -545,6 +559,75 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 	applyXrayDialStack(obs, c.dialStack)
 	raw, err := json.Marshal(cfg)
 	return raw, len(items), fronts, err
+}
+
+// appendXrayShadowsocks splits SS so TCP is spliced in front of a loopback
+// inbound (PROXY protocol keeps the client IP) while UDP stays on the core.
+// xray-core SS 2022 CopyConn never closes the public TCP socket, which left
+// inbound connections in CLOSE-WAIT; the splice front half-closes and reaps
+// them. UDP has no CLOSE-WAIT and cannot use PROXY.
+func appendXrayShadowsocks(in InboundSpec, tag string, item map[string]any, users []UserSpec, listenTags map[string][]string, items []map[string]any, meterTags []string, fronts []frontSpec) ([]map[string]any, []string, []frontSpec, error) {
+	record := func(useTag string) {
+		if in.ID != "" {
+			listenTags[in.ID] = append(listenTags[in.ID], useTag)
+		}
+		meterTags = append(meterTags, useTag)
+	}
+	wantTCP := ssWantsTCP(in)
+	if wantTCP {
+		internalPort, err := reserveLoopbackPort()
+		if err != nil {
+			return items, meterTags, fronts, err
+		}
+		cloned := withSSNetwork(item, "tcp")
+		cloned["tag"] = tag
+		cloned["listen"] = "127.0.0.1"
+		cloned["port"] = internalPort
+		cloned["streamSettings"] = enableXrayProxyProtocol(map[string]any{"network": "tcp"})
+		items = append(items, cloned)
+		record(tag)
+		fronts = append(fronts, inboundPublicFronts(
+			in,
+			net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", internalPort)),
+			"shadowsocks",
+			users,
+			true,
+		)...)
+	}
+	if ssWantsUDP(in) {
+		udpTag := tag
+		if wantTCP {
+			udpTag = tag + "-udp"
+		}
+		hosts := publicCoreListenHosts(FrontListenHosts(inboundStack(in), in.Listen), "udp")
+		if len(hosts) == 0 {
+			return items, meterTags, fronts, nil
+		}
+		for hi, host := range hosts {
+			cloned := withSSNetwork(item, "udp")
+			useTag := udpTag
+			if hi > 0 {
+				useTag = fmt.Sprintf("%s-%d", udpTag, hi)
+			}
+			cloned["tag"] = useTag
+			cloned["listen"] = host
+			cloned["port"] = in.Port
+			items = append(items, cloned)
+			record(useTag)
+		}
+	}
+	return items, meterTags, fronts, nil
+}
+
+func withSSNetwork(item map[string]any, network string) map[string]any {
+	cloned := cloneAnyMap(item)
+	settings, _ := cloned["settings"].(map[string]any)
+	if settings == nil {
+		settings = map[string]any{}
+		cloned["settings"] = settings
+	}
+	settings["network"] = network
+	return cloned
 }
 
 func xrayStreamSettings(in InboundSpec) map[string]any {

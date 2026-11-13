@@ -332,7 +332,7 @@ func nftTableHeader(trim string) (family, table string, skip bool) {
 	}
 	family, table = fields[1], fields[2]
 	switch {
-	case table == plusNftTable, table == "nat", table == "mangle", table == "raw":
+	case table == plusNftTable, table == protectionNftTable, table == "nat", table == "mangle", table == "raw":
 		return family, table, true
 	case family == "arp", family == "bridge", family == "netdev":
 		return family, table, true

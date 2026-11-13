@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/mem"
@@ -20,14 +21,22 @@ const (
 	hostReserveDefault          = 128 << 20
 	defaultMemoryReleaseMinutes = 10
 	unlimitedCgroup             = int64(math.MaxInt64 / 2)
-	// Hosts below this still get an auto GOMEMLIMIT. 1G/2G/4G boxes
-	// sit at or above 900MiB and skip the soft cap so idle RSS can drop.
-	autoMemoryLimitBelow = 900 << 20
+	// 512MiB and below still get an auto GOMEMLIMIT so a monitoring-only
+	// agent cannot eat the box. Anything larger skips the cap at startup;
+	// 640/768/891 "small 1G" hosts do not need it and will GC-thrash if capped.
+	autoMemoryLimitMax = 512 << 20
 )
 
 var (
 	memoryBudget  = detectMemoryBudget
 	effectiveCPUs = detectEffectiveCPUs
+
+	memoryMu          sync.Mutex
+	envMemoryLimit    bool
+	autoMemoryLimited bool
+	autoMemoryLimit   int64
+	proxyMemoryLimit  int64
+	proxyMemoryLifted bool
 )
 
 func configureRuntimeMemory() {
@@ -38,7 +47,13 @@ func configureRuntimeMemory() {
 			runtime.GOMAXPROCS(cpus)
 		}
 	}
-	if os.Getenv("GOMEMLIMIT") == "" {
+	memoryMu.Lock()
+	envMemoryLimit = os.Getenv("GOMEMLIMIT") != ""
+	autoMemoryLimited = false
+	autoMemoryLimit = 0
+	proxyMemoryLimit = 0
+	proxyMemoryLifted = false
+	if !envMemoryLimit {
 		total, limited := memoryBudget()
 		kind := "host"
 		if limited {
@@ -47,19 +62,73 @@ func configureRuntimeMemory() {
 		if shouldSetAutoMemoryLimit(total) {
 			limit := pickAgentMemoryLimit(total, cpus, limited)
 			debug.SetMemoryLimit(limit)
+			autoMemoryLimited = true
+			autoMemoryLimit = limit
+			proxyMemoryLimit = pickProxyMemoryLimit(total, cpus, limited)
 			log.Printf("runtime memory limit %dMiB (%s %dMiB, %d cpu)", limit>>20, kind, total>>20, cpus)
 		} else {
 			log.Printf("runtime memory limit skipped (%s %dMiB, %d cpu; GOGC and periodic release only)", kind, total>>20, cpus)
 		}
 	}
+	memoryMu.Unlock()
 	if os.Getenv("GOGC") == "" {
 		debug.SetGCPercent(50)
 	}
 	startMemoryRelease(memoryReleaseInterval())
 }
 
+// setProxyMemoryMode lifts the auto GOMEMLIMIT while node inbounds are live.
+// A 128MiB cap on a 512MiB box is right for monitoring-only; linked xray
+// sessions need more than that and will GC-thrash if the cap stays.
+func setProxyMemoryMode(live bool) {
+	memoryMu.Lock()
+	defer memoryMu.Unlock()
+	if envMemoryLimit || !autoMemoryLimited {
+		return
+	}
+	if live {
+		if proxyMemoryLifted {
+			return
+		}
+		limit := proxyMemoryLimit
+		if limit <= 0 {
+			limit = autoMemoryLimit
+		}
+		debug.SetMemoryLimit(limit)
+		proxyMemoryLifted = true
+		log.Printf("runtime memory limit %dMiB (live node inbounds)", limit>>20)
+		return
+	}
+	if !proxyMemoryLifted {
+		return
+	}
+	debug.SetMemoryLimit(autoMemoryLimit)
+	proxyMemoryLifted = false
+	log.Printf("runtime memory limit restored %dMiB (no live node inbounds)", autoMemoryLimit>>20)
+}
+
 func shouldSetAutoMemoryLimit(total int64) bool {
-	return total > 0 && total < autoMemoryLimitBelow
+	return total > 0 && total <= autoMemoryLimitMax
+}
+
+func pickProxyMemoryLimit(total int64, cpus int, limited bool) int64 {
+	monitor := pickAgentMemoryLimit(total, cpus, limited)
+	if total <= 0 {
+		return monitor
+	}
+	reserve := int64(hostReserveDefault)
+	if total <= 256<<20 {
+		reserve = hostReserveSmall
+	}
+	lifted := total - reserve
+	if lifted < monitor {
+		lifted = monitor
+	}
+	capAt := total * 9 / 10
+	if capAt > 0 && lifted > capAt {
+		lifted = capAt
+	}
+	return lifted
 }
 
 func pickAgentMemoryLimit(total int64, cpus int, limited bool) int64 {

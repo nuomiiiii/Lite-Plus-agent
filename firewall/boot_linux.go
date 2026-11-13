@@ -12,8 +12,11 @@ import (
 )
 
 func persistBootLocked(eng backend, intent v2.FirewallIntent, holes []v2.FirewallHole) error {
-	if intentIdle(intent) {
+	if intentIdle(intent) && !protectionWantedLocked() {
 		return clearBootPersist()
+	}
+	if intentIdle(intent) {
+		return persistProtectionOnlyBootLocked()
 	}
 	if err := os.MkdirAll(filepath.Dir(statePath()), 0o755); err != nil {
 		return err
@@ -70,6 +73,31 @@ func persistBootLocked(eng backend, intent v2.FirewallIntent, holes []v2.Firewal
 	if err := os.WriteFile(bootPath(bootScriptFile), []byte(script), 0o700); err != nil {
 		return err
 	}
+	if err := persistProtectionBootLocked(); err != nil {
+		log.Printf("protection boot persist: %v", err)
+	}
+	if err := installBootUnit(); err != nil {
+		return err
+	}
+	return applyBootScriptLocked()
+}
+
+func persistProtectionOnlyBootLocked() error {
+	if err := os.MkdirAll(filepath.Dir(statePath()), 0o755); err != nil {
+		return err
+	}
+	_ = os.Remove(bootPath(bootNftFile))
+	_ = os.Remove(bootPath(bootNftHooksFile))
+	_ = os.Remove(bootPath(bootIptablesFile))
+	_ = os.Remove(bootPath(bootIP6tablesFile))
+	_ = os.Remove(nftablesDropin)
+	if err := persistProtectionBootLocked(); err != nil {
+		return err
+	}
+	script := firewallBootScript()
+	if err := os.WriteFile(bootPath(bootScriptFile), []byte(script), 0o700); err != nil {
+		return err
+	}
 	if err := installBootUnit(); err != nil {
 		return err
 	}
@@ -119,11 +147,13 @@ func firewallBootScript() string {
 	v4 := bootPath(bootIptablesFile)
 	v6 := bootPath(bootIP6tablesFile)
 	hooks := bootPath(bootNftHooksFile)
+	prot := bootPath(protectionBootFile)
 	return `#!/bin/sh
 NFT_FILE="` + nft + `"
 HOOKS_FILE="` + hooks + `"
 V4_FILE="` + v4 + `"
 V6_FILE="` + v6 + `"
+PROT_FILE="` + prot + `"
 CHAIN="` + iptablesChain + `"
 TABLE="` + nftTable + `"
 load_nft() {
@@ -165,7 +195,18 @@ load_ipt() {
 	"$bin" -D INPUT -j "$CHAIN" >/dev/null 2>&1 || true
 	"$bin" -I INPUT 1 -j "$CHAIN"
 }
+load_prot() {
+	[ -f "$PROT_FILE" ] || return 0
+	n=0
+	while [ "$n" -lt 5 ]; do
+		nft -f "$PROT_FILE" && return 0
+		n=$((n+1))
+		sleep 1
+	done
+	return 1
+}
 load_nft || exit 1
+load_prot || true
 load_ipt iptables "$V4_FILE" iptables-restore || exit 1
 load_ipt ip6tables "$V6_FILE" ip6tables-restore || exit 1
 exit 0
@@ -222,7 +263,9 @@ func clearBootPersist() error {
 	_ = os.Remove(bootPath(bootIptablesFile))
 	_ = os.Remove(bootPath(bootIP6tablesFile))
 	_ = os.Remove(bootPath(bootScriptFile))
+	_ = os.Remove(bootPath(protectionBootFile))
 	_ = os.Remove(nftablesDropin)
+	_ = os.Remove(protectionDropin)
 	if skipBootUnit() {
 		return nil
 	}

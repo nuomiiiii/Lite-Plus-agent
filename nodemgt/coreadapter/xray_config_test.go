@@ -997,25 +997,36 @@ func TestXraySSConfigUsesPasswordAndMethod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fronts) != 0 {
-		t.Fatalf("ss must listen on the core, fronts=%+v", fronts)
+	if len(fronts) == 0 || fronts[0].Protocol != "shadowsocks" || !fronts[0].ProxyProtocol || fronts[0].Identity {
+		t.Fatalf("ss tcp must splice in front with PROXY, fronts=%+v", fronts)
+	}
+	tcp, udp := xraySSSplitInbounds(t, raw)
+	if tcp["listen"] != "127.0.0.1" {
+		t.Fatalf("ss tcp core must be loopback: %v", tcp)
+	}
+	stream, _ := tcp["streamSettings"].(map[string]any)
+	tcpSet, _ := stream["tcpSettings"].(map[string]any)
+	if tcpSet["acceptProxyProtocol"] != true {
+		t.Fatalf("ss tcp must accept PROXY: %v", tcp)
+	}
+	if udp["listen"] != "127.0.0.1" {
+		t.Fatalf("ss udp must stay on the public listen: %v", udp)
+	}
+	if _, ok := udp["streamSettings"]; ok {
+		t.Fatalf("ss udp must not wrap stream settings: %v", udp)
 	}
 	text := string(raw)
 	for _, part := range []string{
 		`"protocol":"shadowsocks"`,
 		`"password":"secret"`,
 		`"method":"aes-128-gcm"`,
-		`"network":"tcp,udp"`,
 	} {
 		if !strings.Contains(text, part) {
 			t.Fatalf("missing %s in %s", part, text)
 		}
 	}
-	if strings.Contains(text, "acceptProxyProtocol") || strings.Contains(text, "proxy_protocol") {
-		t.Fatalf("ss must not use proxy protocol: %s", text)
-	}
-	if strings.Contains(text, `"streamSettings"`) {
-		t.Fatalf("ss must not wrap stream settings: %s", text)
+	if strings.Contains(text, `"network":"tcp,udp"`) {
+		t.Fatalf("split ss inbounds must not keep combined network: %s", text)
 	}
 }
 
@@ -1026,24 +1037,33 @@ func TestXraySSNetworkHonorsSetting(t *testing.T) {
 		ID: "ss1", Listen: "127.0.0.1", Port: 8388, Protocol: "shadowsocks",
 		SettingsJSON: `{"ss_method":"aes-128-gcm","ss_network":"tcp","transport":"tcp","security":"none"}`,
 	}}
-	raw, _, _, err := c.buildConfig(c.users, c.inbounds, nil, nil)
+	raw, _, fronts, err := c.buildConfig(c.users, c.inbounds, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(raw)
+	if len(fronts) == 0 {
+		t.Fatal("tcp-only ss must be fronted")
+	}
 	if !strings.Contains(text, `"network":"tcp"`) {
 		t.Fatalf("tcp-only ss: %s", text)
 	}
-	if strings.Contains(text, `"network":"tcp,udp"`) {
-		t.Fatalf("tcp-only ss still has both: %s", text)
+	if strings.Contains(text, `"network":"udp"`) || strings.Contains(text, `"network":"tcp,udp"`) {
+		t.Fatalf("tcp-only ss still has udp: %s", text)
 	}
 	c.inbounds[0].SettingsJSON = `{"ss_method":"aes-128-gcm","ss_network":"udp"}`
-	raw, _, _, err = c.buildConfig(c.users, c.inbounds, nil, nil)
+	raw, _, fronts, err = c.buildConfig(c.users, c.inbounds, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(fronts) != 0 {
+		t.Fatalf("udp-only ss must stay on the core, fronts=%+v", fronts)
+	}
 	if !strings.Contains(string(raw), `"network":"udp"`) {
 		t.Fatalf("udp-only ss: %s", raw)
+	}
+	if strings.Contains(string(raw), "acceptProxyProtocol") || strings.Contains(string(raw), `"streamSettings"`) {
+		t.Fatalf("udp-only ss must not use PROXY or stream settings: %s", raw)
 	}
 }
 
@@ -1392,4 +1412,31 @@ func TestSingBoxFailoverBackupDirect(t *testing.T) {
 	if strings.Contains(text, "chain-exit-landings") {
 		t.Fatal("single-landing backup direct should not wrap an inner landing group")
 	}
+}
+
+func xraySSSplitInbounds(t *testing.T, raw []byte) (tcp, udp map[string]any) {
+	t.Helper()
+	var cfg struct {
+		Inbounds []map[string]any `json:"inbounds"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range cfg.Inbounds {
+		if in["protocol"] != "shadowsocks" {
+			continue
+		}
+		settings, _ := in["settings"].(map[string]any)
+		network, _ := settings["network"].(string)
+		switch network {
+		case "tcp":
+			tcp = in
+		case "udp":
+			udp = in
+		}
+	}
+	if tcp == nil || udp == nil {
+		t.Fatalf("want split tcp+udp ss inbounds: %s", raw)
+	}
+	return tcp, udp
 }
