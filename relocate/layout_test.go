@@ -223,4 +223,22 @@ func TestSystemdUnitStartsLiteAgentBinary(t *testing.T) {
 	if strings.Contains(unit, "/opt/komari/agent") {
 		t.Fatal("unit still points at the old agent process name")
 	}
+	if !strings.Contains(unit, "Environment=GODEBUG=disablethp=1") {
+		t.Fatalf("unit missing disablethp:\n%s", unit)
+	}
+}
+
+func TestWithDisableTHPMergesExistingGODEBUG(t *testing.T) {
+	got := withDisableTHP(nil)
+	if len(got) != 1 || got[0] != "GODEBUG=disablethp=1" {
+		t.Fatalf("empty %v", got)
+	}
+	got = withDisableTHP([]string{"GODEBUG=gctrace=1", "FOO=bar"})
+	if got[0] != "GODEBUG=gctrace=1,disablethp=1" || got[1] != "FOO=bar" {
+		t.Fatalf("merge %v", got)
+	}
+	got = withDisableTHP([]string{"GODEBUG=disablethp=1"})
+	if len(got) != 1 || got[0] != "GODEBUG=disablethp=1" {
+		t.Fatalf("already %v", got)
+	}
 }

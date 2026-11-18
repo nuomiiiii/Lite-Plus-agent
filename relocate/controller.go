@@ -30,6 +30,24 @@ func serviceFromCgroup(content string) string {
 	return ""
 }
 
+func withDisableTHP(envs []string) []string {
+	out := make([]string, 0, len(envs)+1)
+	found := false
+	for _, env := range envs {
+		if strings.HasPrefix(env, "GODEBUG=") {
+			found = true
+			if !strings.Contains(env, "disablethp=") {
+				env = env + ",disablethp=1"
+			}
+		}
+		out = append(out, env)
+	}
+	if !found {
+		out = append(out, "GODEBUG=disablethp=1")
+	}
+	return out
+}
+
 func quoteUnitArg(value string) string {
 	if value == "" || strings.ContainsAny(value, " \t\"'\\") {
 		return strconv.Quote(value)
@@ -45,7 +63,7 @@ func systemdUnit(next spec) string {
 		b.WriteString(" " + quoteUnitArg(arg))
 	}
 	b.WriteString("\nWorkingDirectory=" + next.WorkDir + "\nRestart=always\nUser=root\n")
-	for _, env := range next.Environment {
+	for _, env := range withDisableTHP(next.Environment) {
 		b.WriteString("Environment=" + quoteUnitArg(env) + "\n")
 	}
 	for _, file := range next.EnvironmentFiles {

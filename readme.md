@@ -2,7 +2,7 @@
 
 Lite 的跨平台节点监控 Agent。本仓库版本在基础监控之外，支持安全远程终端、文件管理、远程命令、Cloudflare Access、在线配置下发与配置结果回执。
 
-当前稳定版本：`2.3.10.1`
+当前稳定版本：`2.4.0.0`
 
 使用 MCP 代理功能，Lite需升级至 2.3.3 或更高版本。
 
@@ -59,7 +59,7 @@ docker pull ghcr.io/nuomiiiii/lite-agent:latest
 也可以拉取固定版本：
 
 ```bash
-docker pull ghcr.io/nuomiiiii/lite-agent:2.3.10.1
+docker pull ghcr.io/nuomiiiii/lite-agent:2.4.0.0
 ```
 
 容器的启动参数、宿主机目录挂载和节点 Token 请以 Lite 后台生成的部署命令为准。Docker 部署不会在容器内替换 Agent 二进制；升级时需拉取新镜像并重建容器。
@@ -252,5 +252,6 @@ Client ID 与 Client Secret 必须成对配置，可以选择命令行参数、�
 | `2.3.6.4` | HTTP 探测改为带上常见浏览器请求头。原先部分站点会拒绝默认请求并返回 403，延迟被记成失败。未返回成功状态时，探测结果仍记为失败。 |
 | `2.3.10.0` | 修复 CVE-2026-111943。当前 Agent 不受该问题影响，此次一并跟进。 |
 | `2.3.10.1` | 修复远程终端执行输出很多、耗时较长的命令后，过几分钟无法输入的 bug。请配套 Lite 2.3.10 同版本第一次更新。 |
+| `2.4.0.0` | 修复大于 512MiB 的机器仍被加上过紧内存上限、空载被 GC 打高的 bug。ping / 路由探测在连接闪断后仍会把结果传回面板。纯 IPv4 机器不再反复探测 IPv6 公网地址。 |
 
 完整发布记录和升级说明请查看 [GitHub Releases](https://github.com/nuomiiiii/Lite-agent/releases)。
