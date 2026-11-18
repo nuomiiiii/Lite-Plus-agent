@@ -67,7 +67,6 @@ func TestXrayConfigAppliesSniffingStreamAndRoutes(t *testing.T) {
 	for _, part := range []string{
 		`"destOverride"`,
 		`"routeOnly":true`,
-		`"xtls-rprx-vision"`,
 		`"geosite:category-ads-all"`,
 		`"outboundTag":"block"`,
 		`"protocol":"blackhole"`,
@@ -75,6 +74,9 @@ func TestXrayConfigAppliesSniffingStreamAndRoutes(t *testing.T) {
 		if !strings.Contains(text, part) {
 			t.Fatalf("missing %s in %s", part, text)
 		}
+	}
+	if strings.Contains(text, `"xtls-rprx-vision"`) {
+		t.Fatalf("xray websocket inbound must not stamp vision flow: %s", text)
 	}
 	if strings.Contains(text, `"path":"/vless"`) {
 		t.Fatal("identity front should keep websocket off the core inbound")

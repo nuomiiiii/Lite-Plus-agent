@@ -18,23 +18,23 @@ func init() {
 }
 
 type xrayCore struct {
-	mu            sync.Mutex
-	inst          *xraycore.Instance
-	users         []UserSpec
-	inbounds      []InboundSpec
-	outbounds     []OutboundSpec
-	routes        []RouteSpec
-	denied        map[string]struct{}
-	lastUsers     []UserSpec
-	lastIn        []InboundSpec
-	lastOut       []OutboundSpec
-	lastRoutes    []RouteSpec
-	dialStack     string
-	lastDialStack string
-	lastTraffic   map[string]int64
-	lastSeen      map[string]int64
-	fronts        []*spliceFront
-	policy        *policyEngine
+	mu              sync.Mutex
+	inst            *xraycore.Instance
+	users           []UserSpec
+	inbounds        []InboundSpec
+	outbounds       []OutboundSpec
+	routes          []RouteSpec
+	denied          map[string]struct{}
+	builtUsers      []UserSpec
+	lastUsers       []UserSpec
+	lastIn          []InboundSpec
+	lastOut         []OutboundSpec
+	lastRoutes      []RouteSpec
+	lastInboundTags map[string][]string
+	dialStack       string
+	lastDialStack   string
+	fronts          []*spliceFront
+	policy          *policyEngine
 }
 
 func (c *xrayCore) SetForwarding(outbounds []OutboundSpec, routes []RouteSpec) {
@@ -52,7 +52,7 @@ func (c *xrayCore) SetDialStack(stack string) {
 }
 
 func newXrayCore() *xrayCore {
-	return &xrayCore{denied: map[string]struct{}{}, policy: newPolicyEngine()}
+	return &xrayCore{denied: map[string]struct{}{}, policy: newPolicyEngineWithRole("xray")}
 }
 
 func (c *xrayCore) Name() string    { return "xray" }
@@ -70,8 +70,10 @@ func (c *xrayCore) Start(_ context.Context, inbounds []InboundSpec) error {
 	defer c.mu.Unlock()
 	prev := c.inbounds
 	c.inbounds = coreInbounds("xray", inbounds)
+	c.policy.sync(liveUsers(c.users, c.denied, c.inbounds), c.denied)
 	if err := c.applyIfChangedLocked(); err != nil {
 		c.inbounds = prev
+		c.policy.sync(liveUsers(c.users, c.denied, c.inbounds), c.denied)
 		return err
 	}
 	return nil
@@ -80,12 +82,18 @@ func (c *xrayCore) Start(_ context.Context, inbounds []InboundSpec) error {
 func (c *xrayCore) Stop() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	nodeExec.clearRole("xray", c.policy)
+	c.lastInboundTags = nil
 	return c.stopLocked()
 }
 
-func (c *xrayCore) ApplyUsers(users []UserSpec) error {
+func (c *xrayCore) StageUsers(users []UserSpec) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.stageUsersLocked(users)
+}
+
+func (c *xrayCore) stageUsersLocked(users []UserSpec) {
 	c.users = append([]UserSpec(nil), users...)
 	if c.denied == nil {
 		c.denied = map[string]struct{}{}
@@ -95,7 +103,17 @@ func (c *xrayCore) ApplyUsers(users []UserSpec) error {
 			delete(c.denied, u.ID)
 		}
 	}
-	c.policy.sync(c.users, c.denied)
+	check := c.inbounds
+	if len(check) == 0 {
+		check = c.lastIn
+	}
+	c.policy.sync(liveUsers(c.users, c.denied, check), c.denied)
+}
+
+func (c *xrayCore) ApplyUsers(users []UserSpec) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stageUsersLocked(users)
 	return c.applyIfChangedLocked()
 }
 
@@ -107,92 +125,70 @@ func (c *xrayCore) CloseUserSessions(userID string) error {
 	}
 	c.denied[userID] = struct{}{}
 	c.users = markDenied(c.users, userID)
-	c.policy.sync(c.users, c.denied)
-	c.policy.deny(userID)
-	if c.inst == nil && len(c.inbounds) == 0 && len(c.lastIn) == 0 {
-		c.lastUsers = markDenied(c.lastUsers, userID)
-		return nil
-	}
+	c.lastUsers = markDenied(c.lastUsers, userID)
 	check := c.inbounds
 	if len(check) == 0 {
 		check = c.lastIn
 	}
-	if !inboundsNeedCoreRestart(check, c.users) {
+	c.policy.sync(liveUsers(c.users, c.denied, check), c.denied)
+	c.policy.deny(userID)
+	if c.inst != nil {
 		removeXrayUser(c.inst, userID)
-		c.lastUsers = markDenied(c.lastUsers, userID)
-		return nil
 	}
-	if len(c.inbounds) == 0 && len(c.lastIn) > 0 {
-		c.inbounds = append([]InboundSpec(nil), c.lastIn...)
+	return nil
+}
+
+func (c *xrayCore) ClearUserIPs(userID string) {
+	c.policy.clearUserIPs(userID)
+	c.mu.Lock()
+	inst := c.inst
+	c.mu.Unlock()
+	if inst == nil {
+		return
 	}
-	return c.restartLocked()
+	if feat := inst.GetFeature(stats.ManagerType()); feat != nil {
+		if mgr, ok := feat.(stats.Manager); ok && mgr != nil {
+			mgr.VisitOnlineMaps(func(name string, om stats.OnlineMap) bool {
+				parts := strings.Split(name, ">>>")
+				if len(parts) != 3 || parts[0] != "user" || parts[2] != "online" {
+					return true
+				}
+				rawUser := strings.TrimSpace(parts[1])
+				if rawUser == "" || c.policy.isLoopUser(rawUser) {
+					return true
+				}
+				if c.policy.mapStatName(rawUser) != strings.TrimSpace(userID) {
+					return true
+				}
+				var drop []string
+				om.ForEach(func(ip string, _ int64) bool {
+					drop = append(drop, ip)
+					return true
+				})
+				for _, ip := range drop {
+					om.RemoveIP(ip)
+				}
+				return true
+			})
+		}
+	}
 }
 
 func (c *xrayCore) TakeSnapshots() []Snapshot {
-	out := c.policy.snapshots()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.inst == nil {
-		return out
-	}
-	feat := c.inst.GetFeature(stats.ManagerType())
-	mgr, ok := feat.(stats.Manager)
-	if !ok || mgr == nil {
-		return out
-	}
-	byUser := map[string]int64{}
-	mgr.VisitCounters(func(name string, counter stats.Counter) bool {
-		parts := strings.Split(name, ">>>")
-		if len(parts) != 4 || parts[0] != "user" || parts[2] != "traffic" {
-			return true
-		}
-		byUser[c.policy.mapStatName(parts[1])] += counter.Value()
-		return true
-	})
-	if c.lastTraffic == nil {
-		c.lastTraffic = map[string]int64{}
-	}
-	c.lastSeen = byUser
-	coreIDs := map[string]struct{}{}
-	var coreOut []Snapshot
-	for id, n := range byUser {
-		prev := c.lastTraffic[id]
-		delta := n - prev
-		if delta < 0 {
-			delta = n
-		}
-		if delta > 0 {
-			coreOut = append(coreOut, Snapshot{UserID: id, Bytes: delta})
-			coreIDs[id] = struct{}{}
-		}
-	}
-	if len(coreOut) == 0 {
-		return out
-	}
-	filtered := out[:0]
-	for _, snap := range out {
-		if _, ok := coreIDs[snap.UserID]; ok {
-			continue
-		}
-		filtered = append(filtered, snap)
-	}
-	return append(filtered, coreOut...)
+	return c.policy.snapshots()
 }
 
 func (c *xrayCore) AcknowledgeUsage() {
 	c.policy.ack()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.lastTraffic == nil {
-		c.lastTraffic = map[string]int64{}
-	}
-	for id, n := range c.lastSeen {
-		c.lastTraffic[id] = n
-	}
+}
+
+func (c *xrayCore) AcknowledgeUsageItem(userID string, maxBytes int64) int64 {
+	return c.policy.ackUser(userID, maxBytes)
 }
 
 func (c *xrayCore) Presence() []Presence {
 	out := c.policy.presence()
+	unacked := c.policy.unackedMap()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	byID := map[string]Presence{}
@@ -208,7 +204,12 @@ func (c *xrayCore) Presence() []Presence {
 					if len(parts) != 3 || parts[0] != "user" || parts[2] != "online" {
 						return true
 					}
-					id := c.policy.mapStatName(parts[1])
+					rawUser := strings.TrimSpace(parts[1])
+					if rawUser == "" || c.policy.isLoopUser(rawUser) {
+						return true
+					}
+					id := c.policy.mapStatName(rawUser)
+					clearedAt := c.policy.ipClearedAt(id)
 					row := byID[id]
 					row.UserID = id
 					om.ForEach(func(ip string, unix int64) bool {
@@ -217,6 +218,9 @@ func (c *xrayCore) Presence() []Presence {
 							return true
 						}
 						seen := presenceIPAt(ip, unix, now)
+						if !clearedAt.IsZero() && !seen.SeenAt.After(clearedAt) {
+							return true
+						}
 						if now.Sub(seen.SeenAt) > presenceFresh {
 							return true
 						}
@@ -230,9 +234,8 @@ func (c *xrayCore) Presence() []Presence {
 			}
 		}
 	}
-	for id, n := range c.lastSeen {
-		prev := c.lastTraffic[id]
-		if n <= prev {
+	for id, d := range unacked {
+		if d <= 0 {
 			continue
 		}
 		row := byID[id]
@@ -247,15 +250,95 @@ func (c *xrayCore) Presence() []Presence {
 	return rows
 }
 
+func (c *xrayCore) matchesBuiltTopologyLocked(nextUsers []UserSpec) bool {
+	if c.inst == nil || len(c.inbounds) == 0 {
+		return true
+	}
+	nextLive := mergeInboundAccountUsers(nextUsers, c.inbounds)
+	for _, in := range c.inbounds {
+		if identityFront(in, c.builtUsers) != identityFront(in, nextLive) ||
+			coreOwnedTLS(in, c.builtUsers) != coreOwnedTLS(in, nextLive) ||
+			policyExitNeeded(in, c.builtUsers, true) != policyExitNeeded(in, nextLive, true) ||
+			inboundHasActiveUsers(in, c.builtUsers, true) != inboundHasActiveUsers(in, nextLive, true) {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *xrayCore) applyIfChangedLocked() error {
 	nextUsers := applyDenied(c.users, c.denied)
-	if !coreShouldRestart(c.inst != nil, c.inbounds, c.lastIn, nextUsers, c.lastUsers, c.outbounds, c.lastOut, c.routes, c.lastRoutes) && c.dialStack == c.lastDialStack {
+	if !coreShouldRestart(c.inst != nil, c.inbounds, c.lastIn, nextUsers, c.lastUsers, c.outbounds, c.lastOut, c.routes, c.lastRoutes) &&
+		c.dialStack == c.lastDialStack &&
+		c.matchesBuiltTopologyLocked(nextUsers) {
 		if c.inst == nil && len(c.inbounds) == 0 {
 			c.rememberGood()
 		}
 		return nil
 	}
+	if c.tryDynamicUserSyncLocked(nextUsers) {
+		return nil
+	}
 	return c.restartLocked()
+}
+
+func (c *xrayCore) tryDynamicUserSyncLocked(nextUsers []UserSpec) bool {
+	if c.inst == nil || len(c.inbounds) == 0 {
+		return false
+	}
+	if !inboundSpecsEqual(c.inbounds, c.lastIn) ||
+		!outboundSpecsEqual(c.outbounds, c.lastOut) ||
+		!routeSpecsEqual(c.routes, c.lastRoutes) ||
+		c.dialStack != c.lastDialStack {
+		return false
+	}
+	builtLive := c.builtUsers
+	prevLive := mergeInboundAccountUsers(c.lastUsers, c.lastIn)
+	nextLive := mergeInboundAccountUsers(nextUsers, c.inbounds)
+	seenKeys := make(map[string]struct{}, len(c.inbounds))
+	for _, in := range c.inbounds {
+		specKey := inboundSpecKey(in)
+		if _, dup := seenKeys[specKey]; dup {
+			return false
+		}
+		seenKeys[specKey] = struct{}{}
+		if identityFront(in, builtLive) != identityFront(in, nextLive) ||
+			coreOwnedTLS(in, builtLive) != coreOwnedTLS(in, nextLive) ||
+			policyExitNeeded(in, builtLive, true) != policyExitNeeded(in, nextLive, true) {
+			return false
+		}
+		wasActive := inboundHasActiveUsers(in, builtLive, true)
+		nowActive := inboundHasActiveUsers(in, nextLive, true)
+		if wasActive != nowActive {
+			return false
+		}
+		if !nowActive || identityFront(in, nextLive) {
+			continue
+		}
+		if len(c.lastInboundTags[specKey]) == 0 {
+			return false
+		}
+		for _, u := range usersForInbound(nextLive, in.ID) {
+			if _, _, ok := xrayMemoryUser(in, u); !ok {
+				return false
+			}
+		}
+	}
+	for _, in := range c.inbounds {
+		if !inboundHasActiveUsers(in, nextLive, true) || identityFront(in, nextLive) {
+			continue
+		}
+		specKey := inboundSpecKey(in)
+		prevGranted := usersForInbound(prevLive, in.ID)
+		nextGranted := usersForInbound(nextLive, in.ID)
+		if !syncXrayInboundUsers(c.inst, c.lastInboundTags[specKey], in, prevGranted, nextGranted) {
+			return false
+		}
+	}
+	c.policy.sync(nextLive, c.denied)
+	evictChangedOrDeadUsers(c.policy, prevLive, nextLive)
+	c.rememberGood()
+	return true
 }
 
 func (c *xrayCore) stopLocked() error {
@@ -281,6 +364,8 @@ func (c *xrayCore) restartLocked() error {
 	}
 	_ = c.stopLocked()
 	if n == 0 {
+		c.builtUsers = nil
+		c.lastInboundTags = nil
 		c.rememberGood()
 		return nil
 	}
@@ -290,6 +375,7 @@ func (c *xrayCore) restartLocked() error {
 		return err
 	}
 	c.inst = inst
+	c.builtUsers = append([]UserSpec(nil), live...)
 	c.policy.sync(live, c.denied)
 	c.policy.setDialStack(c.dialStack)
 	started, err := startPolicyFronts(c.policy, fronts)
@@ -331,6 +417,7 @@ func (c *xrayCore) restoreLastGood() {
 		return
 	}
 	c.inst = inst
+	c.builtUsers = append([]UserSpec(nil), live...)
 	c.policy.sync(live, c.denied)
 	c.policy.setDialStack(c.dialStack)
 	started, ferr := startPolicyFronts(c.policy, fronts)
@@ -361,8 +448,11 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 	var policyTags []string
 	var skipIP []string
 	var meterTags []string
+	var loopUsers []string
 	listenTags := map[string][]string{}
+	builtTags := map[string][]string{}
 	for i, in := range inbounds {
+		specKey := inboundSpecKey(in)
 		tag := in.ID
 		if tag == "" {
 			tag = fmt.Sprintf("nodemgt-xray-%d", i)
@@ -372,24 +462,45 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 			proto = "socks"
 		}
 		granted := usersForInbound(users, in.ID)
-		accounts := make([]map[string]string, 0, len(granted))
-		clients := make([]map[string]string, 0, len(granted))
+		accounts := make([]map[string]string, 0, len(granted)+1)
+		clients := make([]map[string]string, 0, len(granted)+1)
+		allowsFlow := proto == "vless" && inboundAllowsVLESSFlow(in)
 		for _, u := range granted {
 			accounts = append(accounts, proxyAccounts(u)...)
 			if id := vlessUUID(u); id != "" {
 				client := map[string]string{"id": id, "email": u.ID}
-				if u.Flow != "" {
+				if allowsFlow && u.Flow != "" {
 					client["flow"] = u.Flow
 				}
 				clients = append(clients, client)
 			}
 		}
-		flow := inboundFlow(in)
 		liveClients := clients
-		if flow != "" {
-			liveClients = applyClientFlow(clients, flow)
+		if allowsFlow {
+			if flow := inboundFlow(in); flow != "" {
+				liveClients = applyClientFlow(clients, flow)
+			}
 		}
 		public := coreOwnedTLS(in, users) || udpInbound(proto)
+		isIdentity := !public && identityFront(in, users)
+		var loopUser, loopPass, loopUUID string
+		if isIdentity {
+			var err error
+			switch proto {
+			case "vless":
+				if loopUUID, err = randomLoopbackUUID(); err != nil {
+					return nil, 0, nil, err
+				}
+			case "http", "socks":
+				if loopUser, err = randomHex16(); err != nil {
+					return nil, 0, nil, err
+				}
+				if loopPass, err = randomHex16(); err != nil {
+					return nil, 0, nil, err
+				}
+				loopUsers = append(loopUsers, loopUser)
+			}
+		}
 		var listenHosts []string
 		var listenPort int
 		if public {
@@ -415,8 +526,12 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 			if len(liveClients) == 0 {
 				continue
 			}
+			coreClients := liveClients
+			if loopUUID != "" {
+				coreClients = append(append([]map[string]string(nil), liveClients...), map[string]string{"id": loopUUID})
+			}
 			item["protocol"] = "vless"
-			item["settings"] = map[string]any{"clients": liveClients, "decryption": "none"}
+			item["settings"] = map[string]any{"clients": coreClients, "decryption": "none"}
 		case "vmess":
 			if len(liveClients) == 0 {
 				continue
@@ -443,12 +558,15 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 			item["protocol"] = "shadowsocks"
 			item["settings"] = ssSettings
 		case "http":
-			httpAccounts := make([]map[string]string, 0, len(granted))
+			httpAccounts := make([]map[string]string, 0, len(granted)+1)
 			for _, u := range granted {
 				httpAccounts = append(httpAccounts, proxyAccounts(u)...)
 			}
 			if len(httpAccounts) == 0 && !inboundAllowTransparent(in) {
 				continue
+			}
+			if loopUser != "" {
+				httpAccounts = append(httpAccounts, map[string]string{"user": loopUser, "pass": loopPass})
 			}
 			item["protocol"] = "http"
 			httpSettings := map[string]any{"accounts": httpAccounts}
@@ -460,16 +578,26 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 			if len(accounts) == 0 {
 				continue
 			}
+			coreAccounts := accounts
+			if loopUser != "" {
+				coreAccounts = append(append([]map[string]string(nil), accounts...), map[string]string{"user": loopUser, "pass": loopPass})
+			}
 			item["protocol"] = "socks"
-			item["settings"] = map[string]any{"auth": "password", "accounts": accounts, "udp": false}
+			item["settings"] = map[string]any{"auth": "password", "accounts": coreAccounts, "udp": false}
 		default:
 			continue
 		}
 		if proto == "shadowsocks" {
+			prevCount := len(items)
 			var err error
 			items, meterTags, fronts, err = appendXrayShadowsocks(in, tag, item, users, listenTags, items, meterTags, fronts)
 			if err != nil {
 				return nil, 0, nil, err
+			}
+			for _, added := range items[prevCount:] {
+				if t, _ := added["tag"].(string); t != "" {
+					builtTags[specKey] = append(builtTags[specKey], t)
+				}
 			}
 			continue
 		}
@@ -492,13 +620,13 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 				}
 			}
 			items = append(items, cloned)
+			builtTags[specKey] = append(builtTags[specKey], useTag)
 			if in.ID != "" {
 				listenTags[in.ID] = append(listenTags[in.ID], useTag)
 			}
 			if identityFront(in, users) {
 				skipIP = append(skipIP, useTag)
-			}
-			if public {
+			} else {
 				meterTags = append(meterTags, useTag)
 			}
 			if policyExitNeeded(in, users, true) {
@@ -506,13 +634,24 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 			}
 		}
 		if !public {
-			fronts = append(fronts, inboundPublicFronts(
+			inFronts := inboundPublicFronts(
 				in,
 				net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", listenPort)),
 				proto,
 				users,
 				true,
-			)...)
+			)
+			if isIdentity {
+				inFronts = withFrontLoopbackAuth(
+					inFronts,
+					loopUser,
+					loopPass,
+					loopUUID,
+					builtLoginMapFromAccounts(accounts, "user", "pass"),
+					builtUUIDSetFromClients(liveClients, "id"),
+				)
+			}
+			fronts = append(fronts, inFronts...)
 		}
 	}
 	obs := xrayOutbounds(outbounds)
@@ -525,9 +664,17 @@ func (c *xrayCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outboun
 		if err != nil {
 			return nil, 0, nil, err
 		}
+		for _, ci := range coreIn {
+			if t, _ := ci["tag"].(string); t != "" {
+				skipIP = append(skipIP, t)
+			}
+		}
+		loopUsers = append(loopUsers, loopUsersFromCoreIn(coreIn)...)
 		items = append(items, coreIn...)
 		fronts = append(fronts, extra...)
 	}
+	c.lastInboundTags = builtTags
+	c.policy.setLoopUsers(loopUsers)
 	c.policy.setSkipCoreIP(skipIP)
 	c.policy.setMeterCore(meterTags)
 	cfg := map[string]any{

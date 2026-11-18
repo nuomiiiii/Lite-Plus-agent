@@ -1,6 +1,7 @@
 package firewall
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -915,6 +916,209 @@ func TestParseProtectionCounters(t *testing.T) {
 	got := parseProtectionCounters(raw)
 	if len(got) != 1 || got[0].Dport != 443 || !strings.Contains(got[0].Prefix, "12") {
 		t.Fatalf("%+v", got)
+	}
+}
+
+func TestProtectionPrunesExpiredMapsAndSourceStats(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_DATA_DIR", dir)
+	now := time.Date(2026, 11, 18, 4, 0, 0, 0, time.UTC)
+
+	state := loadProtection()
+	state.Config.Policies = []v2.ProtectionPolicy{{
+		ID:               "p1",
+		Enabled:          true,
+		RequestWindowSec: 60,
+	}}
+	oldTS := now.Add(-25 * time.Hour).Format(time.RFC3339Nano)
+	freshTS := now.Add(-10 * time.Minute).Format(time.RFC3339Nano)
+	state.Config.CounterResetAt = map[string]string{
+		"203.0.113.1": oldTS,
+		"203.0.113.2": freshTS,
+		"203.0.113.3": "invalid-timestamp",
+	}
+	state.GroupApplied = map[string]uint64{"g1": 10}
+	state.Revokes = map[string]v2.ProtectionRevoke{
+		revokeKey("g1", "203.0.113.10"): {Revision: 5, ResetAt: oldTS},
+		revokeKey("g1", "203.0.113.11"): {Revision: 5, ResetAt: freshTS},
+		revokeKey("g1", "203.0.113.12"): {Revision: 8},
+		revokeKey("g1", "203.0.113.13"): {Revision: 12},
+		revokeKey("g1", "203.0.113.14"): {Revision: 15, ResetAt: oldTS},
+	}
+
+	pruneProtectionStateLocked(state, now)
+
+	if _, exists := state.Config.CounterResetAt["203.0.113.1"]; exists {
+		t.Fatal("expired CounterResetAt entry was not pruned")
+	}
+	if _, exists := state.Config.CounterResetAt["203.0.113.3"]; exists {
+		t.Fatal("invalid CounterResetAt entry was not pruned")
+	}
+	if state.Config.CounterResetAt["203.0.113.2"] != freshTS {
+		t.Fatalf("fresh CounterResetAt entry lost: %+v", state.Config.CounterResetAt)
+	}
+	if _, exists := state.Revokes[revokeKey("g1", "203.0.113.10")]; exists {
+		t.Fatal("expired ResetAt revoke covered by GroupApplied was not pruned")
+	}
+	if _, exists := state.Revokes[revokeKey("g1", "203.0.113.12")]; exists {
+		t.Fatal("superseded group revision revoke was not pruned")
+	}
+	if _, exists := state.Revokes[revokeKey("g1", "203.0.113.11")]; !exists {
+		t.Fatal("fresh ResetAt revoke should be retained")
+	}
+	if _, exists := state.Revokes[revokeKey("g1", "203.0.113.13")]; !exists {
+		t.Fatal("newer revision revoke should be retained")
+	}
+	if _, exists := state.Revokes[revokeKey("g1", "203.0.113.14")]; !exists {
+		t.Fatal("group revoke ahead of GroupApplied must be retained even if ResetAt passed retention")
+	}
+
+	longPolicies := []v2.ProtectionPolicy{{
+		ID:               "p-long",
+		Enabled:          true,
+		RequestWindowSec: int((48 * time.Hour).Seconds()),
+	}}
+	thirtyHoursAgo := time.Now().UTC().Add(-30 * time.Hour).Format(time.RFC3339Nano)
+	reconcileLiveResets(map[string]string{
+		"198.51.100.1": oldTS,
+		"198.51.100.2": freshTS,
+	}, state.Config.Policies, now)
+	if !resetTimeFor("198.51.100.1").IsZero() {
+		t.Fatal("expired liveReset entry was not pruned")
+	}
+	if resetTimeFor("198.51.100.2").IsZero() {
+		t.Fatal("fresh liveReset entry was lost")
+	}
+	reconcileLiveResets(nil, longPolicies, time.Now().UTC())
+	rememberResets(map[string]string{"198.51.100.99": thirtyHoursAgo})
+	if resetTimeFor("198.51.100.99").IsZero() {
+		t.Fatal("rememberResets shrank retention to 24h instead of honoring 48h active policy window")
+	}
+
+	bumpLogStats(v2.ProtectionLogSource{ID: "src-keep", Path: "/var/log/a.log", Format: v2.ProtectionLogCaddyJSON}, now, 5, 0, 0, 1)
+	bumpLogStats(v2.ProtectionLogSource{ID: "src-drop", Path: "/var/log/b.log", Format: v2.ProtectionLogCaddyJSON}, now, 3, 0, 0, 0)
+	reconcileLogStats([]v2.ProtectionLogSource{{ID: "src-keep", Path: "/var/log/a.log", Format: v2.ProtectionLogCaddyJSON}})
+
+	stats := ProtectionSourceStats()
+	foundKeep := false
+	for _, st := range stats {
+		if st.ID == "src-drop" {
+			t.Fatal("deleted source ID remained in logStats after reconcileLogStats")
+		}
+		if st.ID == "src-keep" {
+			foundKeep = true
+		}
+	}
+	if !foundKeep {
+		t.Fatal("retained source ID missing from ProtectionSourceStats")
+	}
+}
+
+func TestWatchdogPrunesExpiredProtectionStateToDiskOnce(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_DATA_DIR", dir)
+	logMu.Lock()
+	reportQueue = nil
+	logMu.Unlock()
+	t.Cleanup(func() {
+		logMu.Lock()
+		reportQueue = nil
+		logMu.Unlock()
+	})
+
+	now := time.Now().UTC()
+	oldTS := now.Add(-26 * time.Hour).Format(time.RFC3339Nano)
+	freshTS := now.Add(-5 * time.Minute).Format(time.RFC3339Nano)
+
+	initial := &persistedProtection{
+		RuntimeEnabled: false,
+		Config: v2.ProtectionConfig{
+			Enabled:  true,
+			Revision: 7,
+			Policies: []v2.ProtectionPolicy{{ID: "p1", Enabled: true, RequestWindowSec: 60}},
+			CounterResetAt: map[string]string{
+				"203.0.113.1": oldTS,
+				"203.0.113.2": freshTS,
+			},
+		},
+		Reasons: []v2.ProtectionBanReason{
+			{
+				BanID: "expired-ban", EventID: "expired-ban", IP: "203.0.113.50",
+				ReasonType: v2.ProtectionReasonShared, Status: v2.ProtectionBanActive,
+				CreatedAt: now.Add(-20 * time.Minute).Format(time.RFC3339Nano),
+				ExpiresAt: now.Add(-2 * time.Minute).Format(time.RFC3339Nano),
+			},
+			{
+				BanID: "active-ban", EventID: "active-ban", IP: "203.0.113.51",
+				ReasonType: v2.ProtectionReasonShared, Status: v2.ProtectionBanActive,
+				CreatedAt: now.Format(time.RFC3339Nano),
+				ExpiresAt: now.Add(15 * time.Minute).Format(time.RFC3339Nano),
+			},
+		},
+		GroupApplied: map[string]uint64{"g1": 10},
+		Revokes: map[string]v2.ProtectionRevoke{
+			revokeKey("g1", "203.0.113.60"): {Revision: 5, ResetAt: oldTS},
+			revokeKey("g1", "203.0.113.61"): {Revision: 5, ResetAt: freshTS},
+		},
+		PendingReports: []v2.ProtectionReportParams{{Kind: "queued-report"}},
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate cold-start persisted file on disk (including PendingReports while in-memory reportQueue is empty).
+	encoded, err := json.MarshalIndent(initial, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(protectionStatePath(), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sizeBefore := len(encoded)
+
+	if err := ensureStacks(); err != nil {
+		t.Fatalf("ensureStacks: %v", err)
+	}
+
+	rawAfter, err := os.ReadFile(protectionStatePath())
+	if err != nil {
+		t.Fatalf("read pruned protection-state.json: %v", err)
+	}
+	if len(rawAfter) >= sizeBefore {
+		t.Fatalf("expected protection-state.json to shrink after watchdog prune: before=%d after=%d", sizeBefore, len(rawAfter))
+	}
+
+	got := loadProtection()
+	if len(got.Reasons) != 1 || got.Reasons[0].EventID != "active-ban" {
+		t.Fatalf("expected only active-ban persisted on disk, got %+v", got.Reasons)
+	}
+	if len(got.Config.CounterResetAt) != 1 || got.Config.CounterResetAt["203.0.113.2"] != freshTS {
+		t.Fatalf("expected only fresh CounterResetAt persisted on disk, got %+v", got.Config.CounterResetAt)
+	}
+	if len(got.Revokes) != 1 {
+		t.Fatalf("expected only fresh Revoke persisted on disk, got %+v", got.Revokes)
+	}
+	if len(got.PendingReports) != 1 || got.PendingReports[0].Kind != "queued-report" {
+		t.Fatalf("PendingReports lost during cold-start watchdog prune: %+v", got.PendingReports)
+	}
+
+	// Steady-state watchdog tick with nothing newly expired MUST NOT rewrite protection-state.json.
+	backdated := time.Now().Add(-10 * time.Second).Truncate(time.Second)
+	if err := os.Chtimes(protectionStatePath(), backdated, backdated); err != nil {
+		t.Fatal(err)
+	}
+	stBefore, err := os.Stat(protectionStatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureStacks(); err != nil {
+		t.Fatalf("second ensureStacks: %v", err)
+	}
+	stAfter, err := os.Stat(protectionStatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stAfter.ModTime().Equal(stBefore.ModTime()) {
+		t.Fatalf("steady-state watchdog tick rewrote protection-state.json unnecessarily: before=%v after=%v", stBefore.ModTime(), stAfter.ModTime())
 	}
 }
 

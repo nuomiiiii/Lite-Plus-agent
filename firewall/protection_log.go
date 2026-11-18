@@ -23,12 +23,13 @@ var (
 	logRunning     bool
 	rateCounter    = protection.NewCounter(50000)
 	pathCounter    = protection.NewCounter(50000)
-	reportQueue    []v2.ProtectionReportParams
-	logStats       = map[string]v2.ProtectionSourceStats{}
-	liveResets     = map[string]time.Time{}
-	lastStatsAt    time.Time
-	lastNflogAt    time.Time
-	reportedEvents = map[string]struct{}{}
+	reportQueue       []v2.ProtectionReportParams
+	logStats          = map[string]v2.ProtectionSourceStats{}
+	liveResets        = map[string]time.Time{}
+	liveResetPolicies []v2.ProtectionPolicy
+	lastStatsAt       time.Time
+	lastNflogAt       time.Time
+	reportedEvents    = map[string]struct{}{}
 )
 
 func startProtectionLogLocked(state *persistedProtection, restart bool) {
@@ -44,7 +45,10 @@ func startProtectionLogLocked(state *persistedProtection, restart bool) {
 		}
 		logRunning = false
 	}
+	liveResetPolicies = append([]v2.ProtectionPolicy(nil), state.Config.Policies...)
 	if !state.Config.Enabled || (len(state.Config.Sources) == 0 && !protectionHasNetworkPolicies(state.Config)) {
+		reconcileLogStatsLocked(nil)
+		pruneLiveResetsLocked(liveResetPolicies, time.Now().UTC())
 		logDone = prevDone
 		logMu.Unlock()
 		return
@@ -59,7 +63,9 @@ func startProtectionLogLocked(state *persistedProtection, restart bool) {
 	for id, cur := range state.Cursors {
 		cursors[id] = cur
 	}
+	reconcileLogStatsLocked(cfg.Sources)
 	rememberResetsLocked(cfg.CounterResetAt)
+	pruneLiveResetsLocked(liveResetPolicies, time.Now().UTC())
 	logMu.Unlock()
 	go func() {
 		if prevDone != nil {
@@ -74,6 +80,58 @@ func rememberResets(raw map[string]string) {
 	logMu.Lock()
 	defer logMu.Unlock()
 	rememberResetsLocked(raw)
+	pruneLiveResetsLocked(liveResetPolicies, time.Now().UTC())
+}
+
+func reconcileLiveResets(raw map[string]string, policies []v2.ProtectionPolicy, now time.Time) {
+	logMu.Lock()
+	defer logMu.Unlock()
+	liveResetPolicies = append([]v2.ProtectionPolicy(nil), policies...)
+	liveResets = map[string]time.Time{}
+	rememberResetsLocked(raw)
+	pruneLiveResetsLocked(liveResetPolicies, now)
+}
+
+func pruneLiveResets(policies []v2.ProtectionPolicy, now time.Time) {
+	logMu.Lock()
+	defer logMu.Unlock()
+	liveResetPolicies = append([]v2.ProtectionPolicy(nil), policies...)
+	pruneLiveResetsLocked(liveResetPolicies, now)
+}
+
+func pruneLiveResetsLocked(policies []v2.ProtectionPolicy, now time.Time) {
+	retention := protectionResetRetention(policies)
+	for ip, ts := range liveResets {
+		if ts.IsZero() || now.Sub(ts) > retention {
+			delete(liveResets, ip)
+		}
+	}
+}
+
+func reconcileLogStats(sources []v2.ProtectionLogSource) {
+	logMu.Lock()
+	defer logMu.Unlock()
+	reconcileLogStatsLocked(sources)
+}
+
+func reconcileLogStatsLocked(sources []v2.ProtectionLogSource) {
+	keep := make(map[string]struct{}, len(sources))
+	for _, src := range sources {
+		if src.ID != "" {
+			keep[src.ID] = struct{}{}
+		}
+	}
+	for id := range logStats {
+		if id == "" {
+			if len(sources) == 0 && logStats[id].QueueDropped == 0 {
+				delete(logStats, id)
+			}
+			continue
+		}
+		if _, ok := keep[id]; !ok {
+			delete(logStats, id)
+		}
+	}
 }
 
 func rememberResetsLocked(raw map[string]string) {
@@ -136,6 +194,7 @@ func liveProtectionSources(sources []v2.ProtectionLogSource) []v2.ProtectionLogS
 
 func runProtectionLog(cfg v2.ProtectionConfig, cursors map[string]protection.Cursor, stop <-chan struct{}) {
 	cfg.Sources = liveProtectionSources(cfg.Sources)
+	reconcileLogStats(cfg.Sources)
 	byPath := map[string][]v2.ProtectionLogSource{}
 	for _, src := range cfg.Sources {
 		if protection.IsJournalPath(src.Path) {
@@ -174,6 +233,7 @@ func runProtectionLog(cfg v2.ProtectionConfig, cursors map[string]protection.Cur
 		case <-stop:
 			return
 		case now := <-ticker.C:
+			pruneLiveResets(cfg.Policies, now)
 			for path, sources := range byPath {
 				session := sessions[path]
 				if session == nil {

@@ -89,6 +89,13 @@ func handlePolicyExitUDP(front *spliceFront, client net.Conn, policy *policyEngi
 	var stopOnce sync.Once
 	stopFn := func() { stopOnce.Do(func() { close(stop) }) }
 	defer stopFn()
+	untrackUDP := policy.sess.Track(spec.ID, udpExitAbortCloser{
+		stopFn:   stopFn,
+		client:   client,
+		clientPC: clientPC,
+		wan:      wan,
+	})
+	defer untrackUDP()
 	go func() {
 		defer stopFn()
 		_, _ = io.Copy(io.Discard, client)
@@ -316,11 +323,7 @@ func udpBindHostForClient(client net.Conn) string {
 }
 
 func accountPolicyUDP(policy *policyEngine, userID string, n int, stop <-chan struct{}) bool {
-	if n <= 0 {
-		return true
-	}
-	got, ok := policy.takeBytes(userID, n, stop)
-	return ok && got > 0
+	return policy.accountLinkBytesContext(userID, n, stop)
 }
 
 func parseSocksUDP(pkt []byte) (string, []byte, error) {
@@ -549,3 +552,26 @@ func (c packetConnCloser) RemoteAddr() net.Addr {
 }
 
 var _ net.Conn = packetConnCloser{}
+
+type udpExitAbortCloser struct {
+	stopFn   func()
+	client   net.Conn
+	clientPC net.PacketConn
+	wan      *wanUDP
+}
+
+func (c udpExitAbortCloser) Close() error {
+	if c.stopFn != nil {
+		c.stopFn()
+	}
+	if c.client != nil {
+		_ = c.client.Close()
+	}
+	if c.clientPC != nil {
+		_ = c.clientPC.Close()
+	}
+	if c.wan != nil {
+		_ = c.wan.Close()
+	}
+	return nil
+}

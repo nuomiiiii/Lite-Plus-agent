@@ -188,3 +188,36 @@ func TestBindFileReadsExternalPathsAndDetectsRenewal(t *testing.T) {
 		t.Fatalf("tls fingerprint %q want %q", gotFP, fp2)
 	}
 }
+
+func TestCertStoreRejectsPathTraversalAndBadDomains(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	badDomains := []string{
+		"",
+		".",
+		"..",
+		"../outside",
+		"..\\outside",
+		"sub/../outside.com",
+		"sub/evil.com",
+		"sub\\evil.com",
+		"evil.com:443",
+		"-leading.example.com",
+		"trailing-.example.com",
+		"bad\x00.example.com",
+		"*.*.example.com",
+	}
+	for _, bad := range badDomains {
+		if _, _, err := store.GenerateCSR(bad); err == nil {
+			t.Fatalf("GenerateCSR accepted unsafe domain %q", bad)
+		}
+		if err := store.SaveChainKey(bad, "cert", "key"); err == nil {
+			t.Fatalf("SaveChainKey accepted unsafe domain %q", bad)
+		}
+		if _, _, err := store.PEM(bad); err == nil {
+			t.Fatalf("PEM accepted unsafe domain %q", bad)
+		}
+	}
+}

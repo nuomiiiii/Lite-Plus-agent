@@ -125,7 +125,13 @@ func (n *Native) CloseUserSessions(userID string) error {
 	return nil
 }
 
+func (n *Native) ClearUserIPs(userID string) {
+	ClearUserIPs(userID)
+}
+
 func (n *Native) AcknowledgeUsage() {}
+
+func (n *Native) AcknowledgeUsageItem(string, int64) int64 { return 0 }
 
 func (n *Native) Presence() []Presence {
 	live := n.sess.LiveIPs()
@@ -197,11 +203,12 @@ func (n *Native) handle(conn net.Conn) {
 		return
 	}
 	ip := connClientIP(conn)
-	if !nodeExec.ips.hold(user.ID, ip, user.DeviceLimit) {
+	releaseIP, ok := nodeExec.ips.acquire(user.ID, ip, user.DeviceLimit)
+	if !ok {
 		_, _ = conn.Write([]byte("ERR ips\n"))
 		return
 	}
-	defer nodeExec.ips.release(user.ID, ip)
+	defer releaseIP()
 	sessID := fmt.Sprintf("%s-%d", user.ID, time.Now().UnixNano())
 	n.sess.Add(&sessions.Session{ID: sessID, UserID: user.ID, Conn: conn})
 	defer n.sess.Remove(sessID)

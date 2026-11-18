@@ -2,12 +2,16 @@ package coreadapter
 
 import (
 	"context"
+	"io"
 	"net"
+	"strings"
 	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/buf"
+	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
 
@@ -24,8 +28,8 @@ func newIPLimitTracker(policy *policyEngine) *ipLimitTracker {
 	return &ipLimitTracker{policy: policy}
 }
 
-func (t *ipLimitTracker) holdMeta(metadata adapter.InboundContext) (func(), bool) {
-	if t.policy.skipCoreIPTag(metadata.Inbound) {
+func (t *ipLimitTracker) holdMeta(metadata adapter.InboundContext, closer io.Closer) (func(), bool) {
+	if strings.HasPrefix(metadata.Inbound, "nodemgt-core-") || t.policy.skipCoreIPTag(metadata.Inbound) || t.policy.isLoopUser(metadata.User) {
 		return nil, true
 	}
 	userID := t.policy.mapStatName(metadata.User)
@@ -40,21 +44,29 @@ func (t *ipLimitTracker) holdMeta(metadata adapter.InboundContext) (func(), bool
 		ip = metadata.Source.Addr.String()
 	}
 	limit := t.policy.ipLimit(userID)
-	if !t.policy.holdIP(userID, ip, limit) {
+	releaseIP, ok := t.policy.acquireIP(userID, ip, limit)
+	if !ok {
 		return nil, false
 	}
-	if normalizeClientIP(ip) == "" {
-		return nil, true
-	}
+	untrackSess := t.policy.sess.Track(userID, closer)
+	untrackCore := t.policy.trackCoreConn(userID, closer)
 	var once sync.Once
-	return func() { once.Do(func() { t.policy.releaseIP(userID, ip) }) }, true
+	return func() {
+		once.Do(func() {
+			if releaseIP != nil {
+				releaseIP()
+			}
+			untrackSess()
+			untrackCore()
+		})
+	}, true
 }
 
 func (t *ipLimitTracker) RoutedConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) net.Conn {
-	release, ok := t.holdMeta(metadata)
+	release, ok := t.holdMeta(metadata, conn)
 	if !ok {
 		_ = conn.Close()
-		return conn
+		return deniedConn{Conn: conn}
 	}
 	if release == nil {
 		return conn
@@ -63,10 +75,10 @@ func (t *ipLimitTracker) RoutedConnection(ctx context.Context, conn net.Conn, me
 }
 
 func (t *ipLimitTracker) RoutedPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) N.PacketConn {
-	release, ok := t.holdMeta(metadata)
+	release, ok := t.holdMeta(metadata, conn)
 	if !ok {
 		_ = conn.Close()
-		return conn
+		return deniedPacketConn{PacketConn: conn}
 	}
 	if release == nil {
 		return conn
@@ -117,3 +129,25 @@ func (c *ipLimitPacketConn) Upstream() any {
 
 func (c *ipLimitPacketConn) ReaderReplaceable() bool { return true }
 func (c *ipLimitPacketConn) WriterReplaceable() bool { return true }
+
+type deniedConn struct {
+	net.Conn
+}
+
+func (deniedConn) Read([]byte) (int, error)  { return 0, net.ErrClosed }
+func (deniedConn) Write([]byte) (int, error) { return 0, net.ErrClosed }
+
+type deniedPacketConn struct {
+	N.PacketConn
+}
+
+func (deniedPacketConn) ReadPacket(*buf.Buffer) (M.Socksaddr, error) {
+	return M.Socksaddr{}, net.ErrClosed
+}
+
+func (deniedPacketConn) WritePacket(buffer *buf.Buffer, _ M.Socksaddr) error {
+	if buffer != nil {
+		buffer.Release()
+	}
+	return net.ErrClosed
+}

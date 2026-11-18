@@ -29,9 +29,17 @@ func (t *quotaTracker) RoutedConnection(ctx context.Context, conn net.Conn, meta
 	if userID == "" || conn == nil {
 		return conn
 	}
-	untrack := t.policy.trackCoreConn(userID, conn)
-	count := quotaCount(t.policy, userID, conn)
-	return &quotaCloseConn{Conn: bufio.NewCounterConn(conn, []N.CountFunc{count}, []N.CountFunc{count}), untrack: untrack}
+	stop := make(chan struct{})
+	wc := &quotaCloseConn{stop: stop}
+	count := quotaCount(t.policy, userID, wc, stop)
+	wc.Conn = bufio.NewCounterConn(conn, []N.CountFunc{count}, []N.CountFunc{count})
+	untrackCore := t.policy.trackCoreConn(userID, wc)
+	untrackSess := t.policy.sess.Track(userID, wc)
+	wc.untrack = func() {
+		untrackCore()
+		untrackSess()
+	}
+	return wc
 }
 
 func (t *quotaTracker) RoutedPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) N.PacketConn {
@@ -39,9 +47,17 @@ func (t *quotaTracker) RoutedPacketConnection(ctx context.Context, conn N.Packet
 	if userID == "" || conn == nil {
 		return conn
 	}
-	untrack := t.policy.trackCoreConn(userID, conn)
-	count := quotaCount(t.policy, userID, conn)
-	return &quotaClosePacketConn{PacketConn: bufio.NewCounterPacketConn(conn, []N.CountFunc{count}, []N.CountFunc{count}), untrack: untrack}
+	stop := make(chan struct{})
+	wc := &quotaClosePacketConn{stop: stop}
+	count := quotaCount(t.policy, userID, wc, stop)
+	wc.PacketConn = bufio.NewCounterPacketConn(conn, []N.CountFunc{count}, []N.CountFunc{count})
+	untrackCore := t.policy.trackCoreConn(userID, wc)
+	untrackSess := t.policy.sess.Track(userID, wc)
+	wc.untrack = func() {
+		untrackCore()
+		untrackSess()
+	}
+	return wc
 }
 
 func (t *quotaTracker) RoutedFlow(ctx context.Context, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) tun.FlowTracker {
@@ -55,7 +71,7 @@ func (t *quotaTracker) meterUser(metadata adapter.InboundContext) string {
 	return t.policy.knownUserID(metadata.User)
 }
 
-func quotaCount(policy *policyEngine, userID string, closer io.Closer) N.CountFunc {
+func quotaCount(policy *policyEngine, userID string, closer io.Closer, stop <-chan struct{}) N.CountFunc {
 	var once sync.Once
 	return func(n int64) {
 		if n <= 0 || policy == nil {
@@ -64,7 +80,7 @@ func quotaCount(policy *policyEngine, userID string, closer io.Closer) N.CountFu
 		if n > int64(math.MaxInt) {
 			n = int64(math.MaxInt)
 		}
-		if !policy.accountLinkBytes(userID, int(n)) {
+		if !policy.accountLinkBytesContext(userID, int(n), stop) {
 			once.Do(func() {
 				if closer != nil {
 					_ = closer.Close()
@@ -76,11 +92,18 @@ func quotaCount(policy *policyEngine, userID string, closer io.Closer) N.CountFu
 
 type quotaCloseConn struct {
 	net.Conn
-	untrack func()
-	once    sync.Once
+	stop     chan struct{}
+	stopOnce sync.Once
+	untrack  func()
+	once     sync.Once
 }
 
 func (c *quotaCloseConn) Close() error {
+	c.stopOnce.Do(func() {
+		if c.stop != nil {
+			close(c.stop)
+		}
+	})
 	c.once.Do(func() {
 		if c.untrack != nil {
 			c.untrack()
@@ -112,11 +135,18 @@ func (c *quotaCloseConn) UnwrapWriter() (io.Writer, []N.CountFunc) {
 
 type quotaClosePacketConn struct {
 	N.PacketConn
-	untrack func()
-	once    sync.Once
+	stop     chan struct{}
+	stopOnce sync.Once
+	untrack  func()
+	once     sync.Once
 }
 
 func (c *quotaClosePacketConn) Close() error {
+	c.stopOnce.Do(func() {
+		if c.stop != nil {
+			close(c.stop)
+		}
+	})
 	c.once.Do(func() {
 		if c.untrack != nil {
 			c.untrack()

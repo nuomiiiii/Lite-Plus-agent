@@ -23,29 +23,35 @@ func requireAltLoopback(t *testing.T) {
 
 func TestIPGuardCountsUniqueIPsNotSessions(t *testing.T) {
 	g := newIPGuard()
-	if !g.hold("u1", "203.0.113.10:443", 1) {
+	rel1, ok := g.acquire("u1", "203.0.113.10:443", 1)
+	if !ok {
 		t.Fatal("first ip")
 	}
-	if !g.hold("u1", "203.0.113.10", 1) {
+	rel2, ok := g.acquire("u1", "203.0.113.10", 1)
+	if !ok {
 		t.Fatal("same ip second conn")
 	}
-	if g.hold("u1", "203.0.113.11", 1) {
+	if _, ok := g.acquire("u1", "203.0.113.11", 1); ok {
 		t.Fatal("second ip must be rejected")
 	}
-	g.release("u1", "203.0.113.10")
-	if g.hold("u1", "198.51.100.9", 1) {
+	rel1()
+	if _, ok := g.acquire("u1", "198.51.100.9", 1); ok {
 		t.Fatal("first ip still held")
 	}
-	g.release("u1", "203.0.113.10")
-	if !g.hold("u1", "198.51.100.9", 1) {
+	rel2()
+	rel3, ok := g.acquire("u1", "198.51.100.9", 1)
+	if !ok {
 		t.Fatal("slot after last conn of first ip")
 	}
-	if g.hold("u1", "", 1) {
+	defer rel3()
+	if _, ok := g.acquire("u1", "", 1); ok {
 		t.Fatal("empty ip")
 	}
-	if !g.hold("u1", "203.0.113.10", 0) {
+	relUnlimited, ok := g.acquire("u1", "203.0.113.10", 0)
+	if !ok {
 		t.Fatal("limit 0 is unlimited")
 	}
+	defer relUnlimited()
 	live := g.liveIPs()["u1"]
 	found := false
 	for _, ip := range live {

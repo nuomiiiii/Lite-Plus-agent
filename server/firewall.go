@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	pkg_flags "github.com/nuomiiiii/lite-agent/cmd/flags"
 	"github.com/nuomiiiii/lite-agent/firewall"
 	v2 "github.com/nuomiiiii/lite-agent/protocol/v2"
 	"github.com/nuomiiiii/lite-agent/ws"
@@ -64,7 +65,39 @@ func flushProtectionReportsLoop() {
 	}
 }
 
+func firewallMethodKind(method string) (string, bool) {
+	switch method {
+	case v2.MethodAgentFirewallSnapshot:
+		return v2.FirewallKindSnapshot, true
+	case v2.MethodAgentFirewallApply:
+		return v2.FirewallKindApply, true
+	case v2.MethodAgentFirewallAdopt:
+		return v2.FirewallKindAdopt, true
+	case v2.MethodAgentFirewallInstall:
+		return v2.FirewallKindInstall, true
+	default:
+		return "", false
+	}
+}
+
 func processFirewallEvent(conn *ws.SafeConn, method string, params interface{}) bool {
+	kind, ok := firewallMethodKind(method)
+	if !ok {
+		return false
+	}
+	if !pkg_flags.RemoteControlEnabled() {
+		var req struct {
+			RequestID string `json:"request_id"`
+		}
+		_ = v2.BindParams(params, &req)
+		go reportFirewallResult(conn, v2.FirewallResultParams{
+			RequestID: req.RequestID,
+			Kind:      kind,
+			Status:    v2.FirewallStatusError,
+			Error:     "remote control is disabled.",
+		})
+		return true
+	}
 	switch method {
 	case v2.MethodAgentFirewallSnapshot:
 		var p v2.FirewallSnapshotParams

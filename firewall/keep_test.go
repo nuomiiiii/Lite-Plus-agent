@@ -93,6 +93,24 @@ func TestRuleSafeRejectsInjection(t *testing.T) {
 	}
 }
 
+func TestRuleSafeValidatesRuleID(t *testing.T) {
+	base := v2.FirewallRule{Action: "allow", Protocol: "tcp", Port: "22", Stack: "v4"}
+	for _, validID := range []string{"", "keep-v4-22", "rule_1:a.b-c", strings.Repeat("a", 64)} {
+		r := base
+		r.ID = validID
+		if !ruleSafe(r) {
+			t.Fatalf("expected valid rule ID %q to pass ruleSafe", validID)
+		}
+	}
+	for _, badID := range []string{"bad id", "a;drop", "../x", "a/b", "a\\b", "id\nnext", strings.Repeat("a", 65)} {
+		r := base
+		r.ID = badID
+		if ruleSafe(r) {
+			t.Fatalf("expected invalid rule ID %q to fail ruleSafe", badID)
+		}
+	}
+}
+
 func TestSSHPortOfRejectsJunk(t *testing.T) {
 	if keepPort("0") != "" || keepPort("65536") != "" || keepPort("22;drop") != "" || keepPort("22-22") != "" {
 		t.Fatal("keepPort must only accept a single 1-65535 port")

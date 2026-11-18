@@ -331,9 +331,7 @@ func syncProtectionBansLocked(state *persistedProtection) error {
 		return nil
 	}
 	now := time.Now().UTC()
-	before := len(state.Reasons)
-	pruneReasons(state, now)
-	if len(state.Reasons) != before {
+	if pruneReasons(state, now) {
 		_ = saveProtection(state)
 	}
 	if !protectionTableLive() {

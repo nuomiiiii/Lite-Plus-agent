@@ -2,13 +2,18 @@ package server
 
 import (
 	"log"
+	"sync"
 
+	pkg_flags "github.com/nuomiiiii/lite-agent/cmd/flags"
 	"github.com/nuomiiiii/lite-agent/firewall"
 	v2 "github.com/nuomiiiii/lite-agent/protocol/v2"
 	"github.com/nuomiiiii/lite-agent/ws"
 )
 
-var protectionCmdCh = make(chan func(), 32)
+var (
+	protectionCmdCh = make(chan func(), 32)
+	flushReportMu   sync.Mutex
+)
 
 func init() {
 	go runProtectionCommands()
@@ -29,7 +34,41 @@ func enqueueProtectionCommand(fn func()) bool {
 	}
 }
 
+func protectionMethodKind(method string) (string, bool) {
+	switch method {
+	case v2.MethodAgentProtectionPrecheck:
+		return v2.ProtectionKindPrecheck, true
+	case v2.MethodAgentProtectionUpgrade:
+		return v2.ProtectionKindUpgrade, true
+	case v2.MethodAgentProtectionApplyConfig:
+		return v2.ProtectionKindApplyConfig, true
+	case v2.MethodAgentProtectionBan:
+		return v2.ProtectionKindBan, true
+	case v2.MethodAgentProtectionUnban:
+		return v2.ProtectionKindUnban, true
+	case v2.MethodAgentProtectionGroupSnapshot:
+		return v2.ProtectionKindGroupSnapshot, true
+	case v2.MethodAgentProtectionPreview:
+		return v2.ProtectionKindPreview, true
+	default:
+		return "", false
+	}
+}
+
 func processProtectionEvent(conn *ws.SafeConn, method string, params interface{}) bool {
+	kind, ok := protectionMethodKind(method)
+	if !ok {
+		return false
+	}
+	if !pkg_flags.RemoteControlEnabled() {
+		reportProtectionResult(conn, v2.ProtectionResultParams{
+			RequestID: protectionParamsRequestID(params),
+			Kind:      kind,
+			Status:    v2.ProtectionStatusError,
+			Error:     "remote control is disabled.",
+		})
+		return true
+	}
 	switch method {
 	case v2.MethodAgentProtectionPrecheck:
 		return runProtectionRPC(conn, params, v2.ProtectionKindPrecheck, func(p v2.ProtectionRequest) v2.ProtectionResultParams {
@@ -156,6 +195,8 @@ func reportProtectionResult(conn *ws.SafeConn, result v2.ProtectionResultParams)
 }
 
 func FlushProtectionReports(conn *ws.SafeConn) {
+	flushReportMu.Lock()
+	defer flushReportMu.Unlock()
 	reports := firewall.PeekProtectionReports()
 	sent := 0
 	for _, report := range reports {

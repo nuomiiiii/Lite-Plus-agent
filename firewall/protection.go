@@ -159,12 +159,15 @@ func ApplyProtectionConfig(cfg v2.ProtectionConfig) v2.ProtectionResultParams {
 		cfg.RuntimeEnabled = false
 	}
 	alreadyApplied := shouldSkipProtectionApply(state, cfg)
+	now := time.Now().UTC()
 	resets := state.Config.CounterResetAt
 	state.Config = cfg
-	state.Config.CounterResetAt = mergeCounterResets(resets, cfg.CounterResetAt)
+	state.Config.CounterResetAt = pruneCounterResets(mergeCounterResets(resets, cfg.CounterResetAt), state.Config.Policies, now)
 	state.RuntimeEnabled = cfg.RuntimeEnabled
 	pruneWhitelistLocked(state)
-	rememberResets(state.Config.CounterResetAt)
+	pruneProtectionStateLocked(state, now)
+	reconcileLiveResets(state.Config.CounterResetAt, state.Config.Policies, now)
+	reconcileLogStats(state.Config.Sources)
 	if err := saveProtection(state); err != nil {
 		result.Status = v2.ProtectionStatusError
 		result.Error = err.Error()
@@ -220,6 +223,7 @@ func ProtectionBan(reason v2.ProtectionBanReason, observed uint64) v2.Protection
 	defer opMu.Unlock()
 	result := v2.ProtectionResultParams{Kind: v2.ProtectionKindBan, GroupID: reason.GroupID, GroupRevision: observed}
 	state := loadProtection()
+	pruneProtectionStateLocked(state, time.Now().UTC())
 	if observed > 0 {
 		reason.ObservedRevision = observed
 	}
@@ -358,6 +362,7 @@ func ProtectionUnban(p v2.ProtectionUnbanParams) v2.ProtectionResultParams {
 	}
 	resetProtectionCounters(ip)
 	noteGroupSeen(state, p.GroupID, p.Revision)
+	pruneProtectionStateLocked(state, time.Now().UTC())
 	if err := saveProtection(state); err != nil {
 		result.Status = v2.ProtectionStatusError
 		result.Error = err.Error()
@@ -410,6 +415,7 @@ func ApplyProtectionGroupSnapshot(snap v2.ProtectionGroupSnapshot) v2.Protection
 	}
 	applyRevokeResets(state, snap.Revoked)
 	state.GroupApplied[snap.Group] = snap.Revision
+	pruneProtectionStateLocked(state, now)
 	if err := saveProtection(state); err != nil {
 		result.Status = v2.ProtectionStatusError
 		result.Error = err.Error()
@@ -442,14 +448,21 @@ func restoreProtectionIfNeeded() error {
 
 func restoreProtectionLocked(force bool) error {
 	state := loadProtection()
+	now := time.Now().UTC()
 	restorePendingReports(state)
+	needSave := pruneReasons(state, now)
+	reconcileLiveResets(state.Config.CounterResetAt, state.Config.Policies, now)
+	reconcileLogStats(state.Config.Sources)
 	if stripped := liveProtectionSources(state.Config.Sources); len(stripped) != len(state.Config.Sources) {
 		state.Config.Sources = stripped
-		_ = saveProtection(state)
+		needSave = true
 	}
 	if !state.Config.Enabled && (state.RuntimeEnabled || state.Config.RuntimeEnabled) {
 		state.RuntimeEnabled = false
 		state.Config.RuntimeEnabled = false
+		needSave = true
+	}
+	if needSave {
 		_ = saveProtection(state)
 	}
 	if !state.RuntimeEnabled {
@@ -611,7 +624,11 @@ func snapshotReasonBlocked(state *persistedProtection, snap v2.ProtectionGroupSn
 	return !banFormedAfterRevoke(reason, local)
 }
 
-func pruneReasons(state *persistedProtection, now time.Time) {
+func pruneReasons(state *persistedProtection, now time.Time) bool {
+	if state == nil {
+		return false
+	}
+	beforeReasons := len(state.Reasons)
 	kept := state.Reasons[:0]
 	for _, reason := range state.Reasons {
 		if expiredReason(reason, now) || reason.Status == v2.ProtectionBanRevoked {
@@ -620,6 +637,62 @@ func pruneReasons(state *persistedProtection, now time.Time) {
 		kept = append(kept, reason)
 	}
 	state.Reasons = kept
+	statePruned := pruneProtectionStateLocked(state, now)
+	return len(state.Reasons) != beforeReasons || statePruned
+}
+
+func protectionResetRetention(policies []v2.ProtectionPolicy) time.Duration {
+	d := maxPolicyWindow(policies) + time.Hour
+	if d < 24*time.Hour {
+		d = 24 * time.Hour
+	}
+	return d
+}
+
+func pruneCounterResets(resets map[string]string, policies []v2.ProtectionPolicy, now time.Time) map[string]string {
+	if len(resets) == 0 {
+		return nil
+	}
+	retention := protectionResetRetention(policies)
+	out := make(map[string]string, len(resets))
+	for ip, raw := range resets {
+		ts := parseProtectionTime(raw)
+		if ts.IsZero() || now.Sub(ts) > retention {
+			continue
+		}
+		out[ip] = raw
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func pruneProtectionStateLocked(state *persistedProtection, now time.Time) bool {
+	if state == nil {
+		return false
+	}
+	beforeResets := len(state.Config.CounterResetAt)
+	beforeRevokes := len(state.Revokes)
+	retention := protectionResetRetention(state.Config.Policies)
+	state.Config.CounterResetAt = pruneCounterResets(state.Config.CounterResetAt, state.Config.Policies, now)
+	for key, rev := range state.Revokes {
+		group, _, _ := strings.Cut(key, "|")
+		if group != "" && rev.Revision > 0 && state.GroupApplied[group] < rev.Revision {
+			continue
+		}
+		if strings.TrimSpace(rev.ResetAt) != "" {
+			ts := parseProtectionTime(rev.ResetAt)
+			if ts.IsZero() || now.Sub(ts) > retention {
+				delete(state.Revokes, key)
+			}
+			continue
+		}
+		if group != "" && state.GroupApplied[group] > rev.Revision {
+			delete(state.Revokes, key)
+		}
+	}
+	return len(state.Config.CounterResetAt) != beforeResets || len(state.Revokes) != beforeRevokes
 }
 
 func expiredReason(reason v2.ProtectionBanReason, now time.Time) bool {

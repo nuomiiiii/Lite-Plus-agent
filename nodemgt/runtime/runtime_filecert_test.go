@@ -121,3 +121,76 @@ func TestApplyConfigBindsFileCertAndReportsRenewal(t *testing.T) {
 		t.Fatalf("missing renewal report %#v", reports)
 	}
 }
+
+func TestRestoreRemembersFileCertAndDedupsMissingErrors(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := writeRuntimePair(t, dir, "boot.example")
+	snap := map[string]any{
+		"certs": []any{map[string]any{
+			"id":        "c-boot",
+			"domain":    "boot.example",
+			"status":    "active",
+			"source":    "file",
+			"cert_path": certPath,
+			"key_path":  keyPath,
+		}},
+	}
+	snapRaw, _ := json.Marshal(snap)
+	if err := os.MkdirAll(filepath.Join(dir, "nodemgt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "nodemgt", "last-snapshot.json"), snapRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var reports []map[string]any
+	rt, err := Start(filepath.Join(dir, "agent.json"), func(method string, params any) {
+		if method != v2.MethodNodemgtControlResult {
+			return
+		}
+		raw, _ := json.Marshal(params)
+		var row map[string]any
+		_ = json.Unmarshal(raw, &row)
+		mu.Lock()
+		reports = append(reports, row)
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopGeoRuntime(rt)
+
+	// Unchanged file cert after restore() must NOT trigger spurious reload/report!
+	rt.reloadRenewedFileCerts()
+	mu.Lock()
+	nAfterBoot := len(reports)
+	mu.Unlock()
+	if nAfterBoot != 0 {
+		t.Fatalf("expected 0 reports on unchanged cert after restore, got %#v", reports)
+	}
+
+	// Missing cert file must report failure ONCE and not spam on subsequent ticks!
+	if err := os.Remove(certPath); err != nil {
+		t.Fatal(err)
+	}
+	rt.reloadRenewedFileCerts()
+	rt.reloadRenewedFileCerts()
+	rt.reloadRenewedFileCerts()
+	mu.Lock()
+	nErr := len(reports)
+	mu.Unlock()
+	if nErr != 1 || reports[0]["status"] != "failed" {
+		t.Fatalf("expected exactly 1 deduplicated failure report, got %d: %#v", nErr, reports)
+	}
+
+	// Restoring valid cert file must report applied once and then go quiet again!
+	writeRuntimePair(t, dir, "boot.example")
+	rt.reloadRenewedFileCerts()
+	rt.reloadRenewedFileCerts()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reports) != 2 || reports[1]["status"] != "applied" {
+		t.Fatalf("expected recovery applied report once, got %#v", reports)
+	}
+}

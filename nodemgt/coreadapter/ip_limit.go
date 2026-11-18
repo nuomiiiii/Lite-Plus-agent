@@ -4,7 +4,12 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 )
+
+type ipBucket struct {
+	counts map[string]int
+}
 
 // ipGuard counts concurrent unique client IPs per user. DeviceLimit on UserSpec
 // is that live cap (0 = unlimited). Extra connections from an IP already held
@@ -12,11 +17,11 @@ import (
 // that address closes; historical addresses do not count.
 type ipGuard struct {
 	mu   sync.Mutex
-	live map[string]map[string]int
+	live map[string]*ipBucket
 }
 
 func newIPGuard() *ipGuard {
-	return &ipGuard{live: map[string]map[string]int{}}
+	return &ipGuard{live: map[string]*ipBucket{}}
 }
 
 func normalizeClientIP(raw string) string {
@@ -45,49 +50,50 @@ func connClientIP(conn net.Conn) string {
 	return normalizeClientIP(conn.RemoteAddr().String())
 }
 
-func (g *ipGuard) hold(userID, ip string, limit int) bool {
-	ip = normalizeClientIP(ip)
-	if userID == "" {
-		return limit <= 0
-	}
-	if ip == "" {
-		return limit <= 0
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	byIP := g.live[userID]
-	if byIP == nil {
-		byIP = map[string]int{}
-		g.live[userID] = byIP
-	}
-	if byIP[ip] > 0 {
-		byIP[ip]++
-		return true
-	}
-	if limit > 0 && len(byIP) >= limit {
-		return false
-	}
-	byIP[ip] = 1
-	return true
-}
-
-func (g *ipGuard) release(userID, ip string) {
+func (g *ipGuard) acquire(userID, ip string, limit int) (func(), bool) {
 	ip = normalizeClientIP(ip)
 	if userID == "" || ip == "" {
-		return
+		if limit <= 0 {
+			return func() {}, true
+		}
+		return nil, false
 	}
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	byIP := g.live[userID]
-	n := byIP[ip]
-	if n <= 1 {
-		delete(byIP, ip)
-		if len(byIP) == 0 {
-			delete(g.live, userID)
-		}
-		return
+	bucket := g.live[userID]
+	if bucket == nil {
+		bucket = &ipBucket{counts: map[string]int{}}
+		g.live[userID] = bucket
 	}
-	byIP[ip] = n - 1
+	if bucket.counts[ip] > 0 {
+		bucket.counts[ip]++
+	} else {
+		if limit > 0 && len(bucket.counts) >= limit {
+			if len(bucket.counts) == 0 {
+				delete(g.live, userID)
+			}
+			g.mu.Unlock()
+			return nil, false
+		}
+		bucket.counts[ip] = 1
+	}
+	myBucket := bucket
+	g.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			n := myBucket.counts[ip]
+			if n <= 1 {
+				delete(myBucket.counts, ip)
+				if len(myBucket.counts) == 0 && g.live[userID] == myBucket {
+					delete(g.live, userID)
+				}
+				return
+			}
+			myBucket.counts[ip] = n - 1
+		})
+	}, true
 }
 
 func (g *ipGuard) clear(userID string) {
@@ -103,8 +109,11 @@ func (g *ipGuard) liveIPs() map[string][]string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	out := map[string][]string{}
-	for userID, byIP := range g.live {
-		for ip, n := range byIP {
+	for userID, bucket := range g.live {
+		if bucket == nil {
+			continue
+		}
+		for ip, n := range bucket.counts {
 			if n <= 0 || ip == "" {
 				continue
 			}
@@ -114,12 +123,44 @@ func (g *ipGuard) liveIPs() map[string][]string {
 	return out
 }
 
-func (p *policyEngine) holdIP(userID, ip string, limit int) bool {
-	return p.ips.hold(userID, ip, limit)
+func ClearUserIPs(userID string) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || nodeExec == nil || nodeExec.ips == nil {
+		return
+	}
+	nodeExec.ips.clear(userID)
 }
 
-func (p *policyEngine) releaseIP(userID, ip string) {
-	p.ips.release(userID, ip)
+func (p *policyEngine) clearUserIPs(userID string) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || p == nil {
+		return
+	}
+	if p.ips != nil {
+		p.ips.clear(userID)
+	}
+	now := time.Now().UTC()
+	p.mu.Lock()
+	delete(p.seen, userID)
+	if p.clearedAt == nil {
+		p.clearedAt = map[string]time.Time{}
+	}
+	p.clearedAt[userID] = now
+	p.mu.Unlock()
+}
+
+func (p *policyEngine) ipClearedAt(userID string) time.Time {
+	if p == nil || userID == "" {
+		return time.Time{}
+	}
+	p.mu.Lock()
+	at := p.clearedAt[userID]
+	p.mu.Unlock()
+	return at
+}
+
+func (p *policyEngine) acquireIP(userID, ip string, limit int) (func(), bool) {
+	return p.ips.acquire(userID, ip, limit)
 }
 
 func (p *policyEngine) ipLimit(userID string) int {
@@ -170,16 +211,42 @@ func (p *policyEngine) meterCoreTag(tag string) bool {
 }
 
 func (p *policyEngine) accountLinkBytes(userID string, n int) bool {
+	return p.accountLinkBytesContext(userID, n, nil)
+}
+
+func (p *policyEngine) accountLinkBytesContext(userID string, n int, stop <-chan struct{}) bool {
 	if n <= 0 {
 		return true
+	}
+	if p.userBlocked(userID) {
+		return false
 	}
 	if p.quota.Room(userID) == 0 {
 		p.deny(userID)
 		return false
 	}
-	if _, ok := p.takeBytes(userID, n, nil); !ok {
-		p.deny(userID)
-		return false
+	for rem := n; rem > 0; {
+		if p.userBlocked(userID) {
+			return false
+		}
+		got, ok := p.takeBytes(userID, rem, stop)
+		if !ok {
+			if stop != nil {
+				select {
+				case <-stop:
+					if p.quota.Room(userID) == 0 {
+						p.deny(userID)
+					}
+					return false
+				default:
+				}
+			}
+			if !p.userBlocked(userID) {
+				p.deny(userID)
+			}
+			return false
+		}
+		rem -= got
 	}
 	if p.quota.Room(userID) == 0 {
 		p.deny(userID)

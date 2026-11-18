@@ -41,8 +41,9 @@ func TestPolicyPresenceIncludesCoreHeldIPs(t *testing.T) {
 		ips:  newIPGuard(),
 		seen: map[string]map[string]time.Time{},
 	}
-	if !p.holdIP("u1", "203.0.113.10", 0) {
-		t.Fatal("hold unlimited")
+	rel, ok := p.acquireIP("u1", "203.0.113.10", 0)
+	if !ok {
+		t.Fatal("acquire unlimited")
 	}
 	rows := p.presence()
 	if len(rows) != 1 || rows[0].UserID != "u1" || !rows[0].Online || len(rows[0].IPs) != 1 || rows[0].IPs[0].IP != "203.0.113.10" {
@@ -53,7 +54,7 @@ func TestPolicyPresenceIncludesCoreHeldIPs(t *testing.T) {
 	if len(rows) != 1 || !rows[0].Online || len(rows[0].IPs) != 1 || rows[0].IPs[0].IP != "203.0.113.10" {
 		t.Fatalf("policy-exit hideip must not replace core ip %+v", rows)
 	}
-	p.releaseIP("u1", "203.0.113.10")
+	rel()
 	p.sess.Remove("exit")
 	rows = p.presence()
 	if len(rows) != 1 || rows[0].Online || len(rows[0].IPs) != 0 {

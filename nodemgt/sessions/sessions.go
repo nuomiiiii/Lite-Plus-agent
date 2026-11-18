@@ -1,11 +1,15 @@
 package sessions
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+var nextTrackedSessionID atomic.Uint64
 
 type Session struct {
 	ID     string
@@ -97,6 +101,20 @@ func (s *Set) LiveIPs() map[string][]string {
 		}
 	}
 	return out
+}
+
+func (s *Set) Track(userID string, closer io.Closer) func() {
+	if s == nil || userID == "" || closer == nil {
+		return func() {}
+	}
+	id := fmt.Sprintf("core-%s-%d", userID, nextTrackedSessionID.Add(1))
+	s.Add(&Session{ID: id, UserID: userID, Conn: closer, HideIP: true})
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.Remove(id)
+		})
+	}
 }
 
 func (s *Set) CloseUser(userID string) {

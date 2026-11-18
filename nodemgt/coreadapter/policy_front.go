@@ -3,6 +3,7 @@ package coreadapter
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -122,20 +123,108 @@ var (
 )
 
 type frontSpec struct {
-	Addr          string
-	Dest          string
-	Protocol      string
-	Identity      bool
-	Exit          bool
-	ProxyProtocol bool
-	Egress        []egressHop
-	TLS           *tls.Config
-	Network       string
-	WSPath        string
+	InboundID        string
+	Addr             string
+	Dest             string
+	Protocol         string
+	Identity         bool
+	Exit             bool
+	ProxyProtocol    bool
+	AllowTransparent bool
+	LoopUser         string
+	LoopPass         string
+	LoopUUID         string
+	BuiltLogins      map[string]string
+	BuiltUUIDs       map[string]struct{}
+	Egress           []egressHop
+	TLS              *tls.Config
+	Network          string
+	WSPath           string
+}
+
+func randomHex16() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+func randomLoopbackUUID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return formatUUID(b[:]), nil
+}
+
+func withFrontLoopbackAuth(fronts []frontSpec, loopUser, loopPass, loopUUID string, builtLogins map[string]string, builtUUIDs map[string]struct{}) []frontSpec {
+	for i := range fronts {
+		fronts[i].LoopUser = loopUser
+		fronts[i].LoopPass = loopPass
+		fronts[i].LoopUUID = loopUUID
+		fronts[i].BuiltLogins = builtLogins
+		fronts[i].BuiltUUIDs = builtUUIDs
+	}
+	return fronts
+}
+
+func builtLoginMapFromAccounts(accounts []map[string]string, userKey, passKey string) map[string]string {
+	if len(accounts) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(accounts))
+	for _, acc := range accounts {
+		u := strings.TrimSpace(acc[userKey])
+		if u != "" {
+			out[u] = acc[passKey]
+		}
+	}
+	return out
+}
+
+func builtUUIDSetFromClients(clients []map[string]string, idKey string) map[string]struct{} {
+	if len(clients) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(clients))
+	for _, cl := range clients {
+		id := strings.ToLower(strings.TrimSpace(cl[idKey]))
+		if id != "" {
+			out[id] = struct{}{}
+		}
+	}
+	return out
+}
+
+func loopUsersFromCoreIn(coreIn []map[string]any) []string {
+	var out []string
+	for _, ci := range coreIn {
+		if settings, ok := ci["settings"].(map[string]any); ok {
+			if accs, ok := settings["accounts"].([]map[string]string); ok {
+				for _, acc := range accs {
+					if u := strings.TrimSpace(acc["user"]); u != "" {
+						out = append(out, u)
+					}
+				}
+			}
+		}
+		if users, ok := ci["users"].([]map[string]string); ok {
+			for _, u := range users {
+				if name := strings.TrimSpace(u["username"]); name != "" {
+					out = append(out, name)
+				}
+			}
+		}
+	}
+	return out
 }
 
 type policyEngine struct {
 	mu         sync.Mutex
+	exec       *sharedExec
 	users      []UserSpec
 	denied     map[string]struct{}
 	byLogin    map[string]UserSpec
@@ -146,8 +235,10 @@ type policyEngine struct {
 	used       map[string]int64
 	acked      map[string]int64
 	captured   map[string]int64
+	loopUsers  map[string]struct{}
 	ips        *ipGuard
 	seen       map[string]map[string]time.Time
+	clearedAt  map[string]time.Time
 	skipCoreIP map[string]struct{}
 	meterCore  map[string]struct{}
 	coreConns  map[string]map[io.Closer]struct{}
@@ -155,21 +246,69 @@ type policyEngine struct {
 }
 
 type sharedExec struct {
-	quota *quota.Ledger
-	limit *limiter.Set
-	sess  *sessions.Set
-	ips   *ipGuard
+	mu     sync.Mutex
+	byRole map[string]*policyEngine
+	quota  *quota.Ledger
+	limit  *limiter.Set
+	sess   *sessions.Set
+	ips    *ipGuard
 }
 
 var nodeExec = &sharedExec{
-	quota: quota.New(),
-	limit: limiter.New(),
-	sess:  sessions.New(),
-	ips:   newIPGuard(),
+	byRole: map[string]*policyEngine{},
+	quota:  quota.New(),
+	limit:  limiter.New(),
+	sess:   sessions.New(),
+	ips:    newIPGuard(),
+}
+
+func (s *sharedExec) setRole(role string, p *policyEngine) {
+	if s == nil || role == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.byRole == nil {
+		s.byRole = map[string]*policyEngine{}
+	}
+	s.byRole[role] = p
+	s.mu.Unlock()
+}
+
+func (s *sharedExec) clearRole(role string, p *policyEngine) {
+	if s == nil || role == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.byRole[role] == p {
+		delete(s.byRole, role)
+	}
+	s.mu.Unlock()
+}
+
+func (s *sharedExec) peerUnackedLocked(self *policyEngine, userID string) int64 {
+	if s == nil || userID == "" {
+		return 0
+	}
+	var total int64
+	for _, peer := range s.byRole {
+		if peer == nil || peer == self {
+			continue
+		}
+		peer.mu.Lock()
+		u := peer.unackedBytesLocked(userID)
+		peer.mu.Unlock()
+		total += u
+	}
+	return total
 }
 
 func newPolicyEngine() *policyEngine {
-	return &policyEngine{
+	return newPolicyEngineWithRole("")
+}
+
+func newPolicyEngineWithRole(role string) *policyEngine {
+	p := &policyEngine{
+		exec:       nodeExec,
 		denied:     map[string]struct{}{},
 		byLogin:    map[string]UserSpec{},
 		byUUID:     map[string]UserSpec{},
@@ -178,11 +317,46 @@ func newPolicyEngine() *policyEngine {
 		sess:       nodeExec.sess,
 		used:       map[string]int64{},
 		acked:      map[string]int64{},
+		loopUsers:  map[string]struct{}{},
 		ips:        nodeExec.ips,
 		seen:       map[string]map[string]time.Time{},
+		clearedAt:  map[string]time.Time{},
 		skipCoreIP: map[string]struct{}{},
 		meterCore:  map[string]struct{}{},
 	}
+	if role != "" {
+		nodeExec.setRole(role, p)
+	}
+	return p
+}
+
+func (p *policyEngine) setLoopUsers(users []string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.loopUsers = make(map[string]struct{}, len(users))
+	for _, u := range users {
+		u = strings.TrimSpace(u)
+		if u != "" {
+			p.loopUsers[u] = struct{}{}
+		}
+	}
+	p.mu.Unlock()
+}
+
+func (p *policyEngine) isLoopUser(name string) bool {
+	if p == nil {
+		return false
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	p.mu.Lock()
+	_, ok := p.loopUsers[name]
+	p.mu.Unlock()
+	return ok
 }
 
 func (p *policyEngine) setDialStack(stack string) {
@@ -206,7 +380,48 @@ func (p *policyEngine) currentDialStack() string {
 	return p.dialStack
 }
 
+func (p *policyEngine) unackedBytesLocked(userID string) int64 {
+	if p == nil || userID == "" {
+		return 0
+	}
+	unacked := p.used[userID] - p.acked[userID]
+	if unacked < 0 {
+		return 0
+	}
+	return unacked
+}
+
+func (p *policyEngine) unackedMap() map[string]int64 {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := map[string]int64{}
+	for id := range p.used {
+		if d := p.unackedBytesLocked(id); d > 0 {
+			out[id] = d
+		}
+	}
+	return out
+}
+
 func (p *policyEngine) sync(users []UserSpec, denied map[string]struct{}) {
+	if p == nil {
+		return
+	}
+	if p.exec != nil {
+		p.exec.mu.Lock()
+		defer p.exec.mu.Unlock()
+	}
+	peerUnacked := make(map[string]int64, len(users))
+	if p.exec != nil {
+		for _, u := range users {
+			if n := p.exec.peerUnackedLocked(p, u.ID); n > 0 {
+				peerUnacked[u.ID] = n
+			}
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.users = append([]UserSpec(nil), users...)
@@ -221,9 +436,19 @@ func (p *policyEngine) sync(users []UserSpec, denied map[string]struct{}) {
 		if id := vlessUUID(u); id != "" {
 			p.byUUID[strings.ToLower(id)] = u
 		}
-		p.quota.Configure(u.ID, u.QuotaBytes, u.UsedBytes)
+		effectiveUsed := u.UsedBytes + p.unackedBytesLocked(u.ID) + peerUnacked[u.ID]
+		p.quota.Configure(u.ID, u.QuotaBytes, effectiveUsed)
 		p.limit.Configure(u.ID, u.RateLimitBps)
 	}
+}
+
+func (p *policyEngine) evictSessions(userID string) {
+	if p == nil || userID == "" {
+		return
+	}
+	p.sess.CloseUser(userID)
+	p.ips.clear(userID)
+	p.dropCoreConns(userID)
 }
 
 func (p *policyEngine) deny(userID string) {
@@ -239,9 +464,7 @@ func (p *policyEngine) deny(userID string) {
 		}
 	}
 	p.mu.Unlock()
-	p.sess.CloseUser(userID)
-	p.ips.clear(userID)
-	p.dropCoreConns(userID)
+	p.evictSessions(userID)
 }
 
 func (p *policyEngine) userBlocked(userID string) bool {
@@ -259,7 +482,7 @@ func (p *policyEngine) userBlocked(userID string) bool {
 			return !userLive(u)
 		}
 	}
-	return false
+	return true
 }
 
 func (p *policyEngine) trackCoreConn(userID string, conn io.Closer) func() {
@@ -299,22 +522,54 @@ func (p *policyEngine) dropCoreConns(userID string) {
 }
 
 func (p *policyEngine) lookup(user, pass string) (UserSpec, bool) {
+	return p.lookupForInbound("", user, pass)
+}
+
+func (p *policyEngine) lookupForInbound(inboundID, user, pass string) (UserSpec, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	spec, ok := p.byLogin[user]
-	if !ok {
-		return UserSpec{}, false
+	if inboundID == "" {
+		spec, ok := p.byLogin[user]
+		if !ok {
+			return UserSpec{}, false
+		}
+		if _, denied := p.denied[spec.ID]; denied {
+			return UserSpec{}, false
+		}
+		if !userLive(spec) {
+			return UserSpec{}, false
+		}
+		if spec.Password != "" && spec.Password != pass && spec.UUID != pass {
+			return UserSpec{}, false
+		}
+		return spec, true
 	}
-	if _, denied := p.denied[spec.ID]; denied {
-		return UserSpec{}, false
+	for _, spec := range p.users {
+		if !grantedOn(spec, inboundID) {
+			continue
+		}
+		matched := false
+		if sUser, _, ok := socksIdentity(spec); ok && sUser == user {
+			matched = true
+		}
+		if strings.TrimSpace(spec.Username) != "" && strings.TrimSpace(spec.Username) == user {
+			matched = true
+		}
+		if !matched {
+			continue
+		}
+		if _, denied := p.denied[spec.ID]; denied {
+			continue
+		}
+		if !userLive(spec) {
+			continue
+		}
+		if spec.Password != "" && spec.Password != pass && spec.UUID != pass {
+			continue
+		}
+		return spec, true
 	}
-	if !userLive(spec) {
-		return UserSpec{}, false
-	}
-	if spec.Password != "" && spec.Password != pass && spec.UUID != pass {
-		return UserSpec{}, false
-	}
-	return spec, true
+	return UserSpec{}, false
 }
 
 func (p *policyEngine) trackSession(sess *sessions.Session) {
@@ -413,6 +668,9 @@ func (p *policyEngine) takeBytes(userID string, n int, stop <-chan struct{}) (in
 	if n <= 0 {
 		return 0, true
 	}
+	if p.userBlocked(userID) {
+		return 0, false
+	}
 	room := p.quota.Room(userID)
 	if room == 0 {
 		return 0, false
@@ -422,7 +680,7 @@ func (p *policyEngine) takeBytes(userID string, n int, stop <-chan struct{}) (in
 		want = int(room)
 	}
 	got := p.limit.Wait(userID, want, stop)
-	if got <= 0 {
+	if got <= 0 || p.userBlocked(userID) {
 		return 0, false
 	}
 	if _, _, ok := p.quota.Add(userID, int64(got)); !ok {
@@ -478,20 +736,87 @@ func (p *policyEngine) ack() {
 	p.captured = nil
 }
 
-func (p *policyEngine) lookupUUID(id string) (UserSpec, bool) {
+func (p *policyEngine) ackUser(userID string, maxBytes int64) int64 {
+	if p == nil || userID == "" || maxBytes <= 0 {
+		return 0
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	spec, ok := p.byUUID[strings.ToLower(strings.TrimSpace(id))]
-	if !ok {
+	if p.acked == nil {
+		p.acked = map[string]int64{}
+	}
+	target := p.used[userID]
+	if p.captured != nil {
+		capN, ok := p.captured[userID]
+		if !ok {
+			return 0
+		}
+		target = capN
+	}
+	avail := target - p.acked[userID]
+	if avail <= 0 {
+		if p.captured != nil {
+			delete(p.captured, userID)
+			if len(p.captured) == 0 {
+				p.captured = nil
+			}
+		}
+		return 0
+	}
+	take := avail
+	if take > maxBytes {
+		take = maxBytes
+	}
+	p.acked[userID] += take
+	if p.captured != nil && p.acked[userID] >= target {
+		delete(p.captured, userID)
+		if len(p.captured) == 0 {
+			p.captured = nil
+		}
+	}
+	return take
+}
+
+func (p *policyEngine) lookupUUID(id string) (UserSpec, bool) {
+	return p.lookupUUIDForInbound("", id)
+}
+
+func (p *policyEngine) lookupUUIDForInbound(inboundID, id string) (UserSpec, bool) {
+	want := strings.ToLower(strings.TrimSpace(id))
+	if want == "" {
 		return UserSpec{}, false
 	}
-	if _, denied := p.denied[spec.ID]; denied {
-		return UserSpec{}, false
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if inboundID == "" {
+		spec, ok := p.byUUID[want]
+		if !ok {
+			return UserSpec{}, false
+		}
+		if _, denied := p.denied[spec.ID]; denied {
+			return UserSpec{}, false
+		}
+		if !userLive(spec) {
+			return UserSpec{}, false
+		}
+		return spec, true
 	}
-	if !userLive(spec) {
-		return UserSpec{}, false
+	for _, spec := range p.users {
+		if !grantedOn(spec, inboundID) {
+			continue
+		}
+		if strings.ToLower(vlessUUID(spec)) != want {
+			continue
+		}
+		if _, denied := p.denied[spec.ID]; denied {
+			return UserSpec{}, false
+		}
+		if !userLive(spec) {
+			return UserSpec{}, false
+		}
+		return spec, true
 	}
-	return spec, true
+	return UserSpec{}, false
 }
 
 func (p *policyEngine) mapStatName(name string) string {
@@ -980,6 +1305,14 @@ func attachPolicyExit(obs, rules []map[string]any, users []UserSpec, policyTags 
 		if err != nil {
 			return nil, err
 		}
+		loopUser, err := randomHex16()
+		if err != nil {
+			return nil, err
+		}
+		loopPass, err := randomHex16()
+		if err != nil {
+			return nil, err
+		}
 		tag := "nodemgt-core-" + outTag
 		if xray {
 			coreIn = append(coreIn, map[string]any{
@@ -987,7 +1320,11 @@ func attachPolicyExit(obs, rules []map[string]any, users []UserSpec, policyTags 
 				"listen":   "127.0.0.1",
 				"port":     port,
 				"protocol": "socks",
-				"settings": map[string]any{"auth": "noauth", "udp": true},
+				"settings": map[string]any{
+					"auth":     "password",
+					"accounts": []map[string]string{{"user": loopUser, "pass": loopPass}},
+					"udp":      true,
+				},
 			})
 			detourRules = append(detourRules, map[string]any{
 				"type":        "field",
@@ -1000,13 +1337,19 @@ func attachPolicyExit(obs, rules []map[string]any, users []UserSpec, policyTags 
 				"tag":         tag,
 				"listen":      "127.0.0.1",
 				"listen_port": port,
+				"users":       []map[string]string{{"username": loopUser, "password": loopPass}},
 			})
 			detourRules = append(detourRules, map[string]any{
 				"inbound":  []string{tag},
 				"outbound": outTag,
 			})
 		}
-		hops := []egressHop{{Protocol: "socks", Addr: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}}
+		hops := []egressHop{{
+			Protocol: "socks",
+			Addr:     net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+			User:     loopUser,
+			Pass:     loopPass,
+		}}
 		detours[outTag] = hops
 		return hops, nil
 	}
@@ -1176,14 +1519,16 @@ func newFrontSpec(listen, dest, proto string, in InboundSpec, users []UserSpec, 
 	}
 	identity := identityFront(in, users)
 	return frontSpec{
-		Addr:          listen,
-		Dest:          dest,
-		Protocol:      proto,
-		Identity:      identity,
-		ProxyProtocol: sendProxy && !identity,
-		TLS:           inboundServerTLS(in),
-		Network:       network,
-		WSPath:        inboundWSPath(in),
+		InboundID:        in.ID,
+		Addr:             listen,
+		Dest:             dest,
+		Protocol:         proto,
+		Identity:         identity,
+		ProxyProtocol:    sendProxy && !identity,
+		AllowTransparent: strings.EqualFold(proto, "http") && inboundAllowTransparent(in),
+		TLS:              inboundServerTLS(in),
+		Network:          network,
+		WSPath:           inboundWSPath(in),
 	}
 }
 
@@ -1226,7 +1571,7 @@ func startPolicyFronts(policy *policyEngine, specs []frontSpec) ([]*spliceFront,
 		case spec.Identity && strings.EqualFold(spec.Protocol, "http"):
 			go serveIdentityHTTP(front, spec, policy)
 		case spec.Identity:
-			go serveIdentitySplice(front, spec.Dest, policy)
+			go serveIdentitySpliceSpec(front, spec, policy)
 		default:
 			go serveSplice(front, spec)
 		}
@@ -1326,12 +1671,16 @@ func armSpliceIdle(src net.Conn, idle *atomic.Int64, wait time.Duration) {
 }
 
 func serveIdentitySplice(front *spliceFront, dest string, policy *policyEngine) {
+	serveIdentitySpliceSpec(front, frontSpec{Dest: dest}, policy)
+}
+
+func serveIdentitySpliceSpec(front *spliceFront, spec frontSpec, policy *policyEngine) {
 	for {
 		client, err := front.ln.Accept()
 		if err != nil {
 			return
 		}
-		front.spawnTracked(client, func() { handleIdentitySOCKS(front, client, dest, policy) })
+		front.spawnTracked(client, func() { handleIdentitySOCKSSpec(front, client, spec, policy) })
 	}
 }
 
@@ -1345,11 +1694,15 @@ func serveIdentityHTTP(front *spliceFront, spec frontSpec, policy *policyEngine)
 		if err != nil {
 			return
 		}
-		front.spawnTracked(client, func() { handleIdentityHTTP(front, client, spec.Dest, policy) })
+		front.spawnTracked(client, func() { handleIdentityHTTPSpec(front, client, spec, policy) })
 	}
 }
 
 func handleIdentityHTTP(front *spliceFront, client net.Conn, dest string, policy *policyEngine) {
+	handleIdentityHTTPSpec(front, client, frontSpec{Dest: dest}, policy)
+}
+
+func handleIdentityHTTPSpec(front *spliceFront, client net.Conn, fspec frontSpec, policy *policyEngine) {
 	defer client.Close()
 	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
 	cr := bufio.NewReader(client)
@@ -1362,21 +1715,22 @@ func handleIdentityHTTP(front *spliceFront, client net.Conn, dest string, policy
 		writeProxyStatus(client, http.StatusProxyAuthRequired, map[string]string{"Proxy-Authenticate": `Basic realm="nodemgt"`})
 		return
 	}
-	spec, ok := policy.lookup(user, pass)
+	spec, ok := policy.lookupForInbound(fspec.InboundID, user, pass)
 	if !ok {
 		writeProxyStatus(client, http.StatusProxyAuthRequired, map[string]string{"Proxy-Authenticate": `Basic realm="nodemgt"`})
 		return
 	}
 	ip := connClientIP(client)
-	if !policy.holdIP(spec.ID, ip, spec.DeviceLimit) {
+	releaseIP, ok := policy.acquireIP(spec.ID, ip, spec.DeviceLimit)
+	if !ok {
 		writeProxyStatus(client, http.StatusForbidden, nil)
 		return
 	}
-	defer policy.releaseIP(spec.ID, ip)
+	defer releaseIP()
 	sessID := fmt.Sprintf("%s-%d", spec.ID, time.Now().UnixNano())
 	policy.trackSession(&sessions.Session{ID: sessID, UserID: spec.ID, Conn: client})
 	defer policy.sess.Remove(sessID)
-	backend, err := net.DialTimeout("tcp", dest, 2*time.Second)
+	backend, err := net.DialTimeout("tcp", fspec.Dest, 2*time.Second)
 	if err != nil {
 		writeProxyStatus(client, http.StatusBadGateway, nil)
 		return
@@ -1385,6 +1739,12 @@ func handleIdentityHTTP(front *spliceFront, client net.Conn, dest string, policy
 	defer front.drop(backend)
 	defer backend.Close()
 	_ = backend.SetDeadline(time.Now().Add(3 * time.Second))
+	if builtPass, ok := fspec.BuiltLogins[user]; !ok || builtPass != pass {
+		if fspec.LoopUser != "" {
+			token := base64.StdEncoding.EncodeToString([]byte(fspec.LoopUser + ":" + fspec.LoopPass))
+			req.Header.Set("Proxy-Authorization", "Basic "+token)
+		}
+	}
 	if err := req.WriteProxy(backend); err != nil {
 		return
 	}
@@ -1904,6 +2264,10 @@ func socks5Dest(req []byte) (string, error) {
 }
 
 func handleIdentitySOCKS(front *spliceFront, client net.Conn, dest string, policy *policyEngine) {
+	handleIdentitySOCKSSpec(front, client, frontSpec{Dest: dest}, policy)
+}
+
+func handleIdentitySOCKSSpec(front *spliceFront, client net.Conn, fspec frontSpec, policy *policyEngine) {
 	defer client.Close()
 	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
 	cr := bufio.NewReader(client)
@@ -1922,21 +2286,22 @@ func handleIdentitySOCKS(front *spliceFront, client net.Conn, dest string, polic
 	if err != nil {
 		return
 	}
-	spec, ok := policy.lookup(user, pass)
+	spec, ok := policy.lookupForInbound(fspec.InboundID, user, pass)
 	if !ok {
 		_, _ = client.Write([]byte{0x01, 0x01})
 		return
 	}
 	ip := connClientIP(client)
-	if !policy.holdIP(spec.ID, ip, spec.DeviceLimit) {
+	releaseIP, ok := policy.acquireIP(spec.ID, ip, spec.DeviceLimit)
+	if !ok {
 		_, _ = client.Write([]byte{0x01, 0x01})
 		return
 	}
-	defer policy.releaseIP(spec.ID, ip)
+	defer releaseIP()
 	sessID := fmt.Sprintf("%s-%d", spec.ID, time.Now().UnixNano())
 	policy.trackSession(&sessions.Session{ID: sessID, UserID: spec.ID, Conn: client})
 	defer policy.sess.Remove(sessID)
-	backend, err := net.DialTimeout("tcp", dest, 2*time.Second)
+	backend, err := net.DialTimeout("tcp", fspec.Dest, 2*time.Second)
 	if err != nil {
 		_, _ = client.Write([]byte{0x01, 0x01})
 		return
@@ -1946,7 +2311,15 @@ func handleIdentitySOCKS(front *spliceFront, client net.Conn, dest string, polic
 	defer backend.Close()
 	_ = backend.SetDeadline(time.Now().Add(3 * time.Second))
 	br := bufio.NewReader(backend)
-	if _, err := backend.Write(greeting); err != nil {
+	backUser, backPass := user, pass
+	backGreeting := greeting
+	if builtPass, ok := fspec.BuiltLogins[user]; !ok || builtPass != pass {
+		if fspec.LoopUser != "" {
+			backUser, backPass = fspec.LoopUser, fspec.LoopPass
+			backGreeting = []byte{0x05, 0x01, 0x02}
+		}
+	}
+	if _, err := backend.Write(backGreeting); err != nil {
 		return
 	}
 	method := make([]byte, 2)
@@ -1954,7 +2327,7 @@ func handleIdentitySOCKS(front *spliceFront, client net.Conn, dest string, polic
 		_, _ = client.Write([]byte{0x01, 0x01})
 		return
 	}
-	auth := socks5UserPassBytes(user, pass)
+	auth := socks5UserPassBytes(backUser, backPass)
 	if _, err := backend.Write(auth); err != nil {
 		return
 	}
@@ -2002,7 +2375,7 @@ func serveVLESSFront(front *spliceFront, spec frontSpec, policy *policyEngine) {
 		if err != nil {
 			return
 		}
-		front.spawnTracked(client, func() { handleIdentityVLESS(front, client, spec.Dest, policy) })
+		front.spawnTracked(client, func() { handleIdentityVLESSSpec(front, client, spec, policy) })
 	}
 }
 
@@ -2022,38 +2395,48 @@ func serveVLESSWS(front *spliceFront, ln net.Listener, spec frontSpec, policy *p
 			return
 		}
 		conn := newWSConn(wc)
-		front.spawnTracked(conn, func() { handleIdentityVLESS(front, conn, spec.Dest, policy) })
+		front.spawnTracked(conn, func() { handleIdentityVLESSSpec(front, conn, spec, policy) })
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	_ = srv.Serve(ln)
 }
 
 func handleIdentityVLESS(front *spliceFront, client net.Conn, dest string, policy *policyEngine) {
+	handleIdentityVLESSSpec(front, client, frontSpec{Dest: dest}, policy)
+}
+
+func handleIdentityVLESSSpec(front *spliceFront, client net.Conn, fspec frontSpec, policy *policyEngine) {
 	defer client.Close()
 	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
 	header, uuid, err := readVLESSRequest(client)
 	if err != nil {
 		return
 	}
-	spec, ok := policy.lookupUUID(uuid)
+	spec, ok := policy.lookupUUIDForInbound(fspec.InboundID, uuid)
 	if !ok {
 		return
 	}
 	ip := connClientIP(client)
-	if !policy.holdIP(spec.ID, ip, spec.DeviceLimit) {
+	releaseIP, ok := policy.acquireIP(spec.ID, ip, spec.DeviceLimit)
+	if !ok {
 		return
 	}
-	defer policy.releaseIP(spec.ID, ip)
+	defer releaseIP()
 	sessID := fmt.Sprintf("%s-%d", spec.ID, time.Now().UnixNano())
 	policy.trackSession(&sessions.Session{ID: sessID, UserID: spec.ID, Conn: client})
 	defer policy.sess.Remove(sessID)
-	backend, err := net.DialTimeout("tcp", dest, 2*time.Second)
+	backend, err := net.DialTimeout("tcp", fspec.Dest, 2*time.Second)
 	if err != nil {
 		return
 	}
 	front.track(backend)
 	defer front.drop(backend)
 	defer backend.Close()
+	if _, built := fspec.BuiltUUIDs[strings.ToLower(strings.TrimSpace(uuid))]; !built && fspec.LoopUUID != "" && len(header) >= 17 {
+		if loopBytes, err := parseUUIDBytes(fspec.LoopUUID); err == nil {
+			copy(header[1:17], loopBytes)
+		}
+	}
 	if _, err := backend.Write(header); err != nil {
 		return
 	}
@@ -2110,8 +2493,37 @@ func (v *vlessReplyReader) Read(p []byte) (int, error) {
 	return v.r.Read(p)
 }
 
+type spliceAbortCloser struct {
+	closeStop func()
+	client    net.Conn
+	backend   net.Conn
+}
+
+func (c spliceAbortCloser) Close() error {
+	if c.closeStop != nil {
+		c.closeStop()
+	}
+	if c.client != nil {
+		_ = c.client.Close()
+	}
+	if c.backend != nil {
+		_ = c.backend.Close()
+	}
+	return nil
+}
+
 func splicePolicy(client, backend net.Conn, cr, br io.Reader, userID string, policy *policyEngine) {
 	stop := make(chan struct{})
+	var stopOnce sync.Once
+	closeStop := func() { stopOnce.Do(func() { close(stop) }) }
+	if policy != nil && policy.sess != nil {
+		untrack := policy.sess.Track(userID, spliceAbortCloser{
+			closeStop: closeStop,
+			client:    client,
+			backend:   backend,
+		})
+		defer untrack()
+	}
 	done := make(chan struct{}, 2)
 	go func() {
 		policyCopy(backend, cr, userID, policy, stop)
@@ -2122,7 +2534,7 @@ func splicePolicy(client, backend net.Conn, cr, br io.Reader, userID string, pol
 		done <- struct{}{}
 	}()
 	<-done
-	close(stop)
+	closeStop()
 	_ = client.Close()
 	_ = backend.Close()
 	<-done

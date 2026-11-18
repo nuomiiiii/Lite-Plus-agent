@@ -110,3 +110,130 @@ func coreShouldRestart(running bool, in, lastIn []InboundSpec, users, lastUsers 
 	}
 	return true
 }
+
+func sameInboundGrants(a, b []string) bool {
+	if (a == nil) != (b == nil) || len(a) != len(b) {
+		return false
+	}
+	if a == nil {
+		return true
+	}
+	left := append([]string(nil), a...)
+	right := append([]string(nil), b...)
+	sort.Strings(left)
+	sort.Strings(right)
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func inboundHasActiveUsers(in InboundSpec, live []UserSpec, xray bool) bool {
+	proto := strings.ToLower(strings.TrimSpace(in.Protocol))
+	if proto == "" {
+		proto = "socks"
+	}
+	granted := usersForInbound(live, in.ID)
+	switch proto {
+	case "http":
+		if inboundAllowTransparent(in) {
+			return true
+		}
+		for _, u := range granted {
+			if len(proxyAccounts(u)) > 0 {
+				return true
+			}
+		}
+		return false
+	case "socks", "mixed":
+		for _, u := range granted {
+			if len(proxyAccounts(u)) > 0 {
+				return true
+			}
+		}
+		return false
+	case "vless", "vmess":
+		for _, u := range granted {
+			if vlessUUID(u) != "" {
+				return true
+			}
+		}
+		return false
+	case "trojan", "hysteria2", "anytls":
+		for _, u := range granted {
+			if _, _, ok := socksIdentity(u); ok {
+				return true
+			}
+		}
+		return false
+	case "tuic":
+		for _, u := range granted {
+			if vlessUUID(u) != "" || strings.TrimSpace(u.UUID) != "" {
+				return true
+			}
+		}
+		return false
+	case "shadowsocks":
+		if xray {
+			_, _, ok := ssXrayClients(in, granted)
+			return ok
+		}
+		_, ok := ssSingBoxInbound(in, granted)
+		return ok
+	default:
+		return false
+	}
+}
+
+func evictChangedOrDeadUsers(policy *policyEngine, prevLive, nextLive []UserSpec) {
+	if policy == nil {
+		return
+	}
+	nextByID := make(map[string]UserSpec, len(nextLive))
+	for _, u := range nextLive {
+		nextByID[u.ID] = u
+	}
+	for _, prevU := range prevLive {
+		if !userLive(prevU) {
+			continue
+		}
+		nextU, ok := nextByID[prevU.ID]
+		if !ok || !userLive(nextU) ||
+			prevU.UUID != nextU.UUID ||
+			prevU.Password != nextU.Password ||
+			prevU.Username != nextU.Username ||
+			prevU.Flow != nextU.Flow ||
+			!sameInboundGrants(prevU.InboundIDs, nextU.InboundIDs) {
+			policy.evictSessions(prevU.ID)
+		}
+	}
+}
+
+func singBoxInboundUsersCoveredByBuilt(in InboundSpec, nextGranted, builtLive []UserSpec) bool {
+	builtGranted := usersForInbound(builtLive, in.ID)
+	if len(nextGranted) != len(builtGranted) {
+		return false
+	}
+	builtByID := make(map[string]UserSpec, len(builtGranted))
+	for _, u := range builtGranted {
+		builtByID[u.ID] = u
+	}
+	seen := make(map[string]struct{}, len(nextGranted))
+	for _, u := range nextGranted {
+		if _, dup := seen[u.ID]; dup {
+			return false
+		}
+		seen[u.ID] = struct{}{}
+		b, ok := builtByID[u.ID]
+		if !ok ||
+			b.UUID != u.UUID ||
+			b.Password != u.Password ||
+			b.Username != u.Username ||
+			singBoxNormalizeFlow(b.Flow) != singBoxNormalizeFlow(u.Flow) {
+			return false
+		}
+	}
+	return true
+}

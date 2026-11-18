@@ -27,6 +27,7 @@ type singBoxCore struct {
 	outbounds     []OutboundSpec
 	routes        []RouteSpec
 	denied        map[string]struct{}
+	builtUsers    []UserSpec
 	lastUsers     []UserSpec
 	lastIn        []InboundSpec
 	lastOut       []OutboundSpec
@@ -52,7 +53,7 @@ func (c *singBoxCore) SetDialStack(stack string) {
 }
 
 func newSingBoxCore() *singBoxCore {
-	return &singBoxCore{denied: map[string]struct{}{}, policy: newPolicyEngine()}
+	return &singBoxCore{denied: map[string]struct{}{}, policy: newPolicyEngineWithRole("sing-box")}
 }
 
 func (c *singBoxCore) Name() string    { return "sing-box" }
@@ -70,8 +71,10 @@ func (c *singBoxCore) Start(_ context.Context, inbounds []InboundSpec) error {
 	defer c.mu.Unlock()
 	prev := c.inbounds
 	c.inbounds = coreInbounds("sing-box", inbounds)
+	c.policy.sync(liveUsers(c.users, c.denied, c.inbounds), c.denied)
 	if err := c.applyIfChangedLocked(); err != nil {
 		c.inbounds = prev
+		c.policy.sync(liveUsers(c.users, c.denied, c.inbounds), c.denied)
 		return err
 	}
 	return nil
@@ -80,12 +83,17 @@ func (c *singBoxCore) Start(_ context.Context, inbounds []InboundSpec) error {
 func (c *singBoxCore) Stop() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	nodeExec.clearRole("sing-box", c.policy)
 	return c.stopLocked()
 }
 
-func (c *singBoxCore) ApplyUsers(users []UserSpec) error {
+func (c *singBoxCore) StageUsers(users []UserSpec) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.stageUsersLocked(users)
+}
+
+func (c *singBoxCore) stageUsersLocked(users []UserSpec) {
 	c.users = append([]UserSpec(nil), users...)
 	if c.denied == nil {
 		c.denied = map[string]struct{}{}
@@ -95,7 +103,17 @@ func (c *singBoxCore) ApplyUsers(users []UserSpec) error {
 			delete(c.denied, u.ID)
 		}
 	}
-	c.policy.sync(c.users, c.denied)
+	check := c.inbounds
+	if len(check) == 0 {
+		check = c.lastIn
+	}
+	c.policy.sync(liveUsers(c.users, c.denied, check), c.denied)
+}
+
+func (c *singBoxCore) ApplyUsers(users []UserSpec) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stageUsersLocked(users)
 	return c.applyIfChangedLocked()
 }
 
@@ -108,28 +126,17 @@ func (c *singBoxCore) CloseUserSessions(userID string) error {
 	c.denied[userID] = struct{}{}
 	c.users = markDenied(c.users, userID)
 	c.lastUsers = markDenied(c.lastUsers, userID)
-	c.policy.sync(c.users, c.denied)
-	c.policy.deny(userID)
-	if c.inst == nil && len(c.inbounds) == 0 && len(c.lastIn) == 0 {
-		return nil
-	}
 	check := c.inbounds
 	if len(check) == 0 {
 		check = c.lastIn
 	}
-	if !inboundsNeedCoreRestart(check, c.users) {
-		if c.inst != nil && coreOwnedTLSInbounds(check, c.users) {
-			if len(c.inbounds) == 0 && len(c.lastIn) > 0 {
-				c.inbounds = append([]InboundSpec(nil), c.lastIn...)
-			}
-			return c.restartLocked()
-		}
-		return nil
-	}
-	if len(c.inbounds) == 0 && len(c.lastIn) > 0 {
-		c.inbounds = append([]InboundSpec(nil), c.lastIn...)
-	}
-	return c.restartLocked()
+	c.policy.sync(liveUsers(c.users, c.denied, check), c.denied)
+	c.policy.deny(userID)
+	return nil
+}
+
+func (c *singBoxCore) ClearUserIPs(userID string) {
+	c.policy.clearUserIPs(userID)
 }
 
 func (c *singBoxCore) TakeSnapshots() []Snapshot {
@@ -140,19 +147,81 @@ func (c *singBoxCore) AcknowledgeUsage() {
 	c.policy.ack()
 }
 
+func (c *singBoxCore) AcknowledgeUsageItem(userID string, maxBytes int64) int64 {
+	return c.policy.ackUser(userID, maxBytes)
+}
+
 func (c *singBoxCore) Presence() []Presence {
 	return c.policy.presence()
 }
 
+func (c *singBoxCore) matchesBuiltTopologyLocked(nextUsers []UserSpec) bool {
+	if c.inst == nil || len(c.inbounds) == 0 {
+		return true
+	}
+	nextLive := mergeInboundAccountUsers(nextUsers, c.inbounds)
+	for _, in := range c.inbounds {
+		if identityFront(in, c.builtUsers) != identityFront(in, nextLive) ||
+			coreOwnedTLS(in, c.builtUsers) != coreOwnedTLS(in, nextLive) ||
+			policyExitNeeded(in, c.builtUsers, false) != policyExitNeeded(in, nextLive, false) ||
+			inboundHasActiveUsers(in, c.builtUsers, false) != inboundHasActiveUsers(in, nextLive, false) {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *singBoxCore) applyIfChangedLocked() error {
 	nextUsers := applyDenied(c.users, c.denied)
-	if !coreShouldRestart(c.inst != nil, c.inbounds, c.lastIn, nextUsers, c.lastUsers, c.outbounds, c.lastOut, c.routes, c.lastRoutes) && c.dialStack == c.lastDialStack {
+	if !coreShouldRestart(c.inst != nil, c.inbounds, c.lastIn, nextUsers, c.lastUsers, c.outbounds, c.lastOut, c.routes, c.lastRoutes) &&
+		c.dialStack == c.lastDialStack &&
+		c.matchesBuiltTopologyLocked(nextUsers) {
 		if c.inst == nil && len(c.inbounds) == 0 {
 			c.rememberGood()
 		}
 		return nil
 	}
+	if c.tryDynamicUserSyncLocked(nextUsers) {
+		return nil
+	}
 	return c.restartLocked()
+}
+
+func (c *singBoxCore) tryDynamicUserSyncLocked(nextUsers []UserSpec) bool {
+	if c.inst == nil || len(c.inbounds) == 0 {
+		return false
+	}
+	if !inboundSpecsEqual(c.inbounds, c.lastIn) ||
+		!outboundSpecsEqual(c.outbounds, c.lastOut) ||
+		!routeSpecsEqual(c.routes, c.lastRoutes) ||
+		c.dialStack != c.lastDialStack {
+		return false
+	}
+	builtLive := c.builtUsers
+	prevLive := mergeInboundAccountUsers(c.lastUsers, c.lastIn)
+	nextLive := mergeInboundAccountUsers(nextUsers, c.inbounds)
+	for _, in := range c.inbounds {
+		if identityFront(in, builtLive) != identityFront(in, nextLive) ||
+			coreOwnedTLS(in, builtLive) != coreOwnedTLS(in, nextLive) ||
+			policyExitNeeded(in, builtLive, false) != policyExitNeeded(in, nextLive, false) {
+			return false
+		}
+		wasActive := inboundHasActiveUsers(in, builtLive, false)
+		nowActive := inboundHasActiveUsers(in, nextLive, false)
+		if wasActive != nowActive {
+			return false
+		}
+		if !nowActive || identityFront(in, nextLive) {
+			continue
+		}
+		if !singBoxInboundUsersCoveredByBuilt(in, usersForInbound(nextLive, in.ID), c.builtUsers) {
+			return false
+		}
+	}
+	c.policy.sync(nextLive, c.denied)
+	evictChangedOrDeadUsers(c.policy, prevLive, nextLive)
+	c.rememberGood()
+	return true
 }
 
 func (c *singBoxCore) stopLocked() error {
@@ -182,6 +251,7 @@ func (c *singBoxCore) restartLocked() error {
 	}
 	_ = c.stopLocked()
 	if n == 0 {
+		c.builtUsers = nil
 		c.rememberGood()
 		return nil
 	}
@@ -192,6 +262,7 @@ func (c *singBoxCore) restartLocked() error {
 	}
 	c.inst = inst
 	c.cancel = cancel
+	c.builtUsers = append([]UserSpec(nil), live...)
 	c.policy.sync(live, c.denied)
 	c.policy.setDialStack(c.dialStack)
 	attachSingBoxTrackers(c.inst, c.policy)
@@ -235,6 +306,7 @@ func (c *singBoxCore) restoreLastGood() {
 	}
 	c.inst = inst
 	c.cancel = cancel
+	c.builtUsers = append([]UserSpec(nil), live...)
 	c.policy.sync(live, c.denied)
 	c.policy.setDialStack(c.dialStack)
 	attachSingBoxTrackers(c.inst, c.policy)
@@ -284,6 +356,7 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 	var policyTags []string
 	var skipIP []string
 	var meterTags []string
+	var loopUsers []string
 	listenTags := map[string][]string{}
 	for i, in := range inbounds {
 		tag := in.ID
@@ -312,6 +385,39 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 		// sing-box. Inbound PROXY protocol was removed in 1.6.0, so those
 		// protocols must bind the public address or device limits see 127.0.0.1.
 		public := singBoxPublicCore(in, users)
+		isIdentity := !public && identityFront(in, users)
+		var loopUser, loopPass, loopUUID string
+		if isIdentity {
+			var err error
+			switch proto {
+			case "vless":
+				if loopUUID, err = randomLoopbackUUID(); err != nil {
+					return nil, 0, nil, err
+				}
+			case "http", "socks", "mixed":
+				if loopUser, err = randomHex16(); err != nil {
+					return nil, 0, nil, err
+				}
+				if loopPass, err = randomHex16(); err != nil {
+					return nil, 0, nil, err
+				}
+				loopUsers = append(loopUsers, loopUser)
+			}
+		}
+		var builtLogins map[string]string
+		var builtUUIDs map[string]struct{}
+		if isIdentity {
+			var userAccounts []map[string]string
+			var userClients []map[string]string
+			for _, u := range granted {
+				userAccounts = append(userAccounts, proxyAuthUsers(u)...)
+				if id := vlessUUID(u); id != "" {
+					userClients = append(userClients, map[string]string{"uuid": id})
+				}
+			}
+			builtLogins = builtLoginMapFromAccounts(userAccounts, "username", "password")
+			builtUUIDs = builtUUIDSetFromClients(userClients, "uuid")
+		}
 		if !public {
 			internalPort, err := reserveLoopbackPort()
 			if err != nil {
@@ -326,6 +432,9 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 				users,
 				false,
 			)
+			if isIdentity {
+				pendingFronts = withFrontLoopbackAuth(pendingFronts, loopUser, loopPass, loopUUID, builtLogins, builtUUIDs)
+			}
 		}
 		item := map[string]any{
 			"type":        proto,
@@ -343,27 +452,33 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 		}
 		switch proto {
 		case "socks", "mixed":
-			authUsers := make([]map[string]string, 0, len(granted))
+			authUsers := make([]map[string]string, 0, len(granted)+1)
 			for _, u := range granted {
 				authUsers = append(authUsers, proxyAuthUsers(u)...)
 			}
 			if len(authUsers) == 0 {
 				continue
 			}
+			if loopUser != "" {
+				authUsers = append(authUsers, map[string]string{"username": loopUser, "password": loopPass})
+			}
 			item["users"] = authUsers
 		case "http":
-			authUsers := make([]map[string]string, 0, len(granted))
+			authUsers := make([]map[string]string, 0, len(granted)+1)
 			for _, u := range granted {
 				authUsers = append(authUsers, proxyAuthUsers(u)...)
 			}
 			if len(authUsers) == 0 && !inboundAllowTransparent(in) {
 				continue
 			}
+			if loopUser != "" {
+				authUsers = append(authUsers, map[string]string{"username": loopUser, "password": loopPass})
+			}
 			if len(authUsers) > 0 {
 				item["users"] = authUsers
 			}
 		case "vless", "vmess":
-			clients := make([]map[string]string, 0, len(granted))
+			clients := make([]map[string]string, 0, len(granted)+1)
 			for _, u := range granted {
 				id := vlessUUID(u)
 				if id == "" {
@@ -384,6 +499,9 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 				if flow := singBoxNormalizeFlow(inboundFlow(in)); flow != "" {
 					clients = applyClientFlow(clients, flow)
 				}
+			}
+			if proto == "vless" && loopUUID != "" {
+				clients = append(clients, map[string]string{"uuid": loopUUID})
 			}
 			item["users"] = clients
 		case "trojan", "hysteria2", "anytls":
@@ -476,9 +594,16 @@ func (c *singBoxCore) buildConfig(users []UserSpec, inbounds []InboundSpec, outb
 		if err != nil {
 			return nil, 0, nil, err
 		}
+		for _, ci := range coreIn {
+			if t, _ := ci["tag"].(string); t != "" {
+				skipIP = append(skipIP, t)
+			}
+		}
+		loopUsers = append(loopUsers, loopUsersFromCoreIn(coreIn)...)
 		items = append(items, coreIn...)
 		fronts = append(fronts, extra...)
 	}
+	c.policy.setLoopUsers(loopUsers)
 	c.policy.setSkipCoreIP(skipIP)
 	c.policy.setMeterCore(meterTags)
 	cfg := map[string]any{

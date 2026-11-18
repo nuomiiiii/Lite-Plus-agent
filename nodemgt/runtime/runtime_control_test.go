@@ -180,10 +180,336 @@ func newApplyRuntime(t *testing.T, cores ...coreadapter.Core) *Runtime {
 		t.Fatal(err)
 	}
 	return &Runtime{
-		dir:    dir,
-		certs:  certs,
-		cores:  cores,
-		denied: map[string]struct{}{},
-		quota:  quota.New(),
+		dir:         dir,
+		certs:       certs,
+		cores:       cores,
+		denied:      map[string]struct{}{},
+		quotaDenied: map[string]struct{}{},
+		quota:       quota.New(),
+	}
+}
+
+func TestSyncQuotaUnblocksExhaustedUserWhileKeepingAdminRevoked(t *testing.T) {
+	dir := t.TempDir()
+	echo := startEcho(t)
+	defer echo.Close()
+	port := freePort(t)
+	rt, err := Start(filepath.Join(dir, "agent.json"), func(string, any) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopGeoRuntime(rt)
+
+	sendSnap := func(op, kind string, u1Used, u1Quota int64) {
+		rt.HandleControl(map[string]any{
+			"operation_id": op,
+			"kind":         kind,
+			"payload": map[string]any{
+				"inbounds": []any{map[string]any{
+					"id": "socks", "core": "xray", "listen": "127.0.0.1", "port": port, "protocol": "socks", "enabled": true,
+				}},
+				"users": []any{
+					map[string]any{
+						"id": "u-quota", "status": "active", "quota_bytes": u1Quota, "used_bytes": u1Used,
+						"inbound_ids": []string{"socks"},
+						"credentials": []any{map[string]any{"uuid": "quota-alice", "secret": "pw", "enabled": true}},
+					},
+					map[string]any{
+						"id": "u-revoked", "status": "active", "quota_bytes": 10000, "used_bytes": 0,
+						"inbound_ids": []string{"socks"},
+						"credentials": []any{map[string]any{"uuid": "revoked-bob", "secret": "pw", "enabled": true}},
+					},
+				},
+			},
+		}, "")
+	}
+	canDial := func(user string) bool {
+		d, err := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", port), &proxy.Auth{User: user, Password: "pw"}, &net.Dialer{Timeout: 2 * time.Second})
+		if err != nil {
+			return false
+		}
+		c, err := d.Dial("tcp", echo.Addr().String())
+		if err != nil {
+			return false
+		}
+		defer c.Close()
+		return echoN(c, 4) == nil
+	}
+
+	sendSnap("cfg-1", "applyConfig", 0, 20)
+	waitPort(t, port)
+	if !canDial("quota-alice") || !canDial("revoked-bob") {
+		t.Fatal("initial users should connect")
+	}
+
+	// Admin revokes u-revoked.
+	rt.HandleControl(map[string]any{
+		"operation_id": "rev-bob",
+		"kind":         "revokeUser",
+		"payload":      map[string]any{"user_ids": []string{"u-revoked"}},
+	}, "")
+	if canDial("revoked-bob") {
+		t.Fatal("admin revoked user still connected")
+	}
+
+	// Exhaust u-quota locally and run FlushUsage.
+	d, _ := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", port), &proxy.Auth{User: "quota-alice", Password: "pw"}, &net.Dialer{Timeout: 2 * time.Second})
+	if c, err := d.Dial("tcp", echo.Addr().String()); err == nil {
+		_ = echoN(c, 10) // 20 bytes total -> hits 20B quota!
+		_ = c.Close()
+	}
+	rt.FlushUsage()
+	if canDial("quota-alice") {
+		t.Fatal("quota-exhausted user still connected")
+	}
+	if rawDenied, err := os.ReadFile(filepath.Join(dir, "nodemgt", "denied.json")); err == nil {
+		if strings.Contains(string(rawDenied), "u-quota") {
+			t.Fatalf("quota exhaustion must not write into admin denied.json: %s", rawDenied)
+		}
+	}
+
+	// A stale pre-flush syncQuota (still carrying UsedBytes=0 from before FlushUsage)
+	// MUST NOT wipe out the 20 flushed bytes or falsely unblock u-quota!
+	sendSnap("stale-pre-flush-sync", "syncQuota", 0, 20)
+	if canDial("quota-alice") {
+		t.Fatal("stale pre-flush syncQuota wiped flushed bytes and falsely unblocked u-quota")
+	}
+
+	// Genuine monthly traffic reset arrives via syncQuota (traffic-reset:<user>:<cycle>, UsedBytes=0 < QuotaBytes=20):
+	// u-quota MUST immediately unblock, while admin-revoked u-revoked MUST stay blocked!
+	sendSnap("traffic-reset:u-quota:2026-11", "syncQuota", 0, 20)
+	if !canDial("quota-alice") {
+		t.Fatal("syncQuota after monthly reset failed to unblock u-quota")
+	}
+	if canDial("revoked-bob") {
+		t.Fatal("syncQuota must not unblock admin-revoked u-revoked")
+	}
+}
+
+func TestExpiredUserStaysBlockedAcrossRestartUntilRenewed(t *testing.T) {
+	dir := t.TempDir()
+	echo := startEcho(t)
+	defer echo.Close()
+	port := freePort(t)
+	cfgPath := filepath.Join(dir, "agent.json")
+
+	rt, err := Start(cfgPath, func(string, any) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	canDialUser := func(username, password string) bool {
+		d, err := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", port), &proxy.Auth{User: username, Password: password}, &net.Dialer{Timeout: 2 * time.Second})
+		if err != nil {
+			return false
+		}
+		c, err := d.Dial("tcp", echo.Addr().String())
+		if err != nil {
+			return false
+		}
+		defer c.Close()
+		return echoN(c, 4) == nil
+	}
+
+	soon := time.Now().UTC().Add(180 * time.Millisecond).Format(time.RFC3339Nano)
+	rt.HandleControl(map[string]any{
+		"operation_id": "exp-init",
+		"kind":         "applyConfig",
+		"payload": map[string]any{
+			"inbounds": []any{map[string]any{
+				"id": "socks", "core": "xray", "listen": "127.0.0.1", "port": port, "protocol": "socks", "enabled": true,
+			}},
+			"users": []any{
+				map[string]any{
+					"id": "u-exp", "status": "active", "expires_at": soon, "inbound_ids": []string{"socks"},
+					"credentials": []any{map[string]any{"uuid": "exp-alice", "secret": "pw", "enabled": true}},
+				},
+				map[string]any{
+					"id": "u-keep", "status": "active", "inbound_ids": []string{"socks"},
+					"credentials": []any{map[string]any{"uuid": "keep-bob", "secret": "pw2", "enabled": true}},
+				},
+			},
+		},
+	}, "")
+	waitPort(t, port)
+	if !canDialUser("exp-alice", "pw") || !canDialUser("keep-bob", "pw2") {
+		stopGeoRuntime(rt)
+		t.Fatal("both users should connect before expiration")
+	}
+
+	time.Sleep(250 * time.Millisecond)
+	rt.expireUsers()
+	if canDialUser("exp-alice", "pw") {
+		stopGeoRuntime(rt)
+		t.Fatal("expired user still connected after expireUsers")
+	}
+	if !canDialUser("keep-bob", "pw2") {
+		stopGeoRuntime(rt)
+		t.Fatal("active user lost access when sibling user expired")
+	}
+	stopGeoRuntime(rt)
+
+	// Simulate Agent process restart: last-snapshot.json still has status="active",
+	// and Start() restores before Master sends any new snapshot!
+	rt2, err := Start(cfgPath, func(string, any) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopGeoRuntime(rt2)
+	waitPort(t, port)
+
+	if !canDialUser("keep-bob", "pw2") {
+		t.Fatal("active user failed to connect after Agent restart")
+	}
+	if canDialUser("exp-alice", "pw") {
+		t.Fatal("expired user connected after Agent restart before Master snapshot")
+	}
+
+	// Admin renews the user into the future -> user immediately reconnects!
+	future := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano)
+	rt2.HandleControl(map[string]any{
+		"operation_id": "exp-renew",
+		"kind":         "applyConfig",
+		"payload": map[string]any{
+			"inbounds": []any{map[string]any{
+				"id": "socks", "core": "xray", "listen": "127.0.0.1", "port": port, "protocol": "socks", "enabled": true,
+			}},
+			"users": []any{
+				map[string]any{
+					"id": "u-exp", "status": "active", "expires_at": future, "inbound_ids": []string{"socks"},
+					"credentials": []any{map[string]any{"uuid": "exp-alice", "secret": "pw", "enabled": true}},
+				},
+				map[string]any{
+					"id": "u-keep", "status": "active", "inbound_ids": []string{"socks"},
+					"credentials": []any{map[string]any{"uuid": "keep-bob", "secret": "pw2", "enabled": true}},
+				},
+			},
+		},
+	}, "")
+	if !canDialUser("exp-alice", "pw") {
+		t.Fatal("renewed user failed to reconnect after applyConfig")
+	}
+}
+
+func TestQuotaExhaustedUserStaysBlockedAcrossRestartUntilToppedUp(t *testing.T) {
+	dir := t.TempDir()
+	echo := startEcho(t)
+	defer echo.Close()
+	port := freePort(t)
+	cfgPath := filepath.Join(dir, "agent.json")
+
+	rt, err := Start(cfgPath, func(string, any) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	canDialUser := func(username, password string, n int) bool {
+		d, err := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", port), &proxy.Auth{User: username, Password: password}, &net.Dialer{Timeout: 2 * time.Second})
+		if err != nil {
+			return false
+		}
+		c, err := d.Dial("tcp", echo.Addr().String())
+		if err != nil {
+			return false
+		}
+		defer c.Close()
+		return echoN(c, n) == nil
+	}
+
+	rt.HandleControl(map[string]any{
+		"operation_id": "qd-init",
+		"kind":         "applyConfig",
+		"payload": map[string]any{
+			"inbounds": []any{map[string]any{
+				"id": "socks", "core": "sing-box", "listen": "127.0.0.1", "port": port, "protocol": "socks", "enabled": true,
+			}},
+			"users": []any{
+				map[string]any{
+					"id": "u-qexhaust", "status": "active", "quota_bytes": 40, "used_bytes": 0, "inbound_ids": []string{"socks"},
+					"credentials": []any{map[string]any{"uuid": "q-alice", "secret": "pw1", "enabled": true}},
+				},
+				map[string]any{
+					"id": "u-qkeep", "status": "active", "quota_bytes": 10000, "used_bytes": 0, "inbound_ids": []string{"socks"},
+					"credentials": []any{map[string]any{"uuid": "q-bob", "secret": "pw2", "enabled": true}},
+				},
+			},
+		},
+	}, "")
+	waitPort(t, port)
+
+	// Consume all 40 bytes (20 up + 20 down) for u-qexhaust, then FlushUsage succeeds
+	// (removing pending-usage.json while last-snapshot.json still has used_bytes=0!).
+	if !canDialUser("q-alice", "pw1", 20) {
+		stopGeoRuntime(rt)
+		t.Fatal("u-qexhaust initial 40B transfer should succeed")
+	}
+	rt.SetSender(func(string, any) error { return nil })
+	rt.FlushUsage()
+	if canDialUser("q-alice", "pw1", 4) {
+		stopGeoRuntime(rt)
+		t.Fatal("exhausted user still connected after FlushUsage")
+	}
+	stopGeoRuntime(rt)
+
+	// Simulate Agent self-upgrade / restart: last-snapshot.json still says used_bytes=0,
+	// pending-usage.json is gone, so quota-denied.json MUST keep u-qexhaust blocked!
+	rt2, err := Start(cfgPath, func(string, any) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopGeoRuntime(rt2)
+	waitPort(t, port)
+
+	if !canDialUser("q-bob", "pw2", 4) {
+		t.Fatal("healthy user failed to connect after Agent restart")
+	}
+	if canDialUser("q-alice", "pw1", 4) {
+		t.Fatal("quota-exhausted user reconnected after Agent restart before Master syncQuota!")
+	}
+
+	// Master pushes monthly reset / top-up via syncQuota -> u-qexhaust immediately unblocks!
+	rt2.HandleControl(map[string]any{
+		"operation_id": "traffic-reset:u-qexhaust:2026-12",
+		"kind":         "syncQuota",
+		"payload": map[string]any{
+			"inbounds": []any{map[string]any{
+				"id": "socks", "core": "sing-box", "listen": "127.0.0.1", "port": port, "protocol": "socks", "enabled": true,
+			}},
+			"users": []any{
+				map[string]any{
+					"id": "u-qexhaust", "status": "active", "quota_bytes": 200, "used_bytes": 0, "inbound_ids": []string{"socks"},
+					"credentials": []any{map[string]any{"uuid": "q-alice", "secret": "pw1", "enabled": true}},
+				},
+				map[string]any{
+					"id": "u-qkeep", "status": "active", "quota_bytes": 10000, "used_bytes": 0, "inbound_ids": []string{"socks"},
+					"credentials": []any{map[string]any{"uuid": "q-bob", "secret": "pw2", "enabled": true}},
+				},
+			},
+		},
+	}, "")
+	if !canDialUser("q-alice", "pw1", 4) {
+		t.Fatal("topped-up/reset user failed to reconnect after syncQuota")
+	}
+}
+
+func TestHandleControlClearUserIPs(t *testing.T) {
+	core := &geoLoopCore{}
+	var got map[string]any
+	rt := newApplyRuntime(t, core)
+	rt.result = func(_ string, params any) {
+		got, _ = params.(map[string]any)
+	}
+	if !rt.HandleControl(map[string]any{
+		"operation_id": "clear-ip-op",
+		"kind":         "clearUserIPs",
+		"payload":      map[string]any{"user_ids": []string{"u1", "u2"}},
+	}, "ev-1") {
+		t.Fatal("HandleControl returned false")
+	}
+	if strings.Join(core.clearedIPs, ",") != "u1,u2" {
+		t.Fatalf("clearedIPs = %v, want [u1 u2]", core.clearedIPs)
+	}
+	if got["status"] != "applied" || got["operation_id"] != "clear-ip-op" {
+		t.Fatalf("controlResult = %#v", got)
 	}
 }

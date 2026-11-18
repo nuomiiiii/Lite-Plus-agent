@@ -41,7 +41,31 @@ func sourceOK(raw string) bool {
 	return !strings.ContainsAny(raw, " \t\n\r;\"'`$|&{}()\\%")
 }
 
+func ruleIDOK(raw string) bool {
+	if raw == "" {
+		return true
+	}
+	if len(raw) > 64 {
+		return false
+	}
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		switch {
+		case c >= 'A' && c <= 'Z':
+		case c >= 'a' && c <= 'z':
+		case c >= '0' && c <= '9':
+		case c == '.' || c == '_' || c == ':' || c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func ruleSafe(rule v2.FirewallRule) bool {
+	if !ruleIDOK(rule.ID) {
+		return false
+	}
 	switch rule.Protocol {
 	case v2.FirewallProtoTCP, v2.FirewallProtoUDP:
 	default:

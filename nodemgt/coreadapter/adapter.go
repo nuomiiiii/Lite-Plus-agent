@@ -82,6 +82,7 @@ type Core interface {
 	Stop() error
 	ApplyUsers(users []UserSpec) error
 	CloseUserSessions(userID string) error
+	ClearUserIPs(userID string)
 	TakeSnapshots() []Snapshot
 	AcknowledgeUsage()
 	Presence() []Presence

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -25,7 +26,9 @@ type geoTestRoundTrip func(*http.Request) (*http.Response, error)
 func (f geoTestRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 type geoLoopCore struct {
+	mu            sync.Mutex
 	closed        []string
+	clearedIPs    []string
 	presenceCalls int
 }
 
@@ -37,14 +40,29 @@ func (*geoLoopCore) Stop() error                                           { ret
 func (*geoLoopCore) LiveInbounds() bool                                    { return false }
 func (*geoLoopCore) ApplyUsers([]coreadapter.UserSpec) error               { return nil }
 func (c *geoLoopCore) CloseUserSessions(id string) error {
+	c.mu.Lock()
 	c.closed = append(c.closed, id)
+	c.mu.Unlock()
 	return nil
+}
+func (c *geoLoopCore) ClearUserIPs(id string) {
+	c.mu.Lock()
+	c.clearedIPs = append(c.clearedIPs, id)
+	c.mu.Unlock()
 }
 func (*geoLoopCore) TakeSnapshots() []coreadapter.Snapshot { return nil }
 func (*geoLoopCore) AcknowledgeUsage()                     {}
 func (c *geoLoopCore) Presence() []coreadapter.Presence {
+	c.mu.Lock()
 	c.presenceCalls++
+	c.mu.Unlock()
 	return []coreadapter.Presence{{UserID: "expiry-user", Online: true}}
+}
+
+func (c *geoLoopCore) snapshotState() (calls int, closed []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.presenceCalls, append([]string(nil), c.closed...)
 }
 
 func TestUsedCoreNamesFollowsEnabledInbounds(t *testing.T) {
@@ -128,14 +146,15 @@ func TestGeoRefreshDoesNotBlockExpireAndPresence(t *testing.T) {
 		time.Sleep(12 * time.Hour)
 		<-entered
 		synctest.Wait()
-		beforePresence := core.presenceCalls
+		beforePresence, _ := core.snapshotState()
 		time.Sleep(16 * time.Second)
 		synctest.Wait()
-		if len(core.closed) != 1 || core.closed[0] != "expiry-user" {
-			t.Fatalf("expire should run during geo refresh, closed=%v", core.closed)
+		afterPresence, closed := core.snapshotState()
+		if len(closed) != 1 || closed[0] != "expiry-user" {
+			t.Fatalf("expire should run during geo refresh, closed=%v", closed)
 		}
-		if core.presenceCalls <= beforePresence {
-			t.Fatalf("presence should continue during geo refresh, before=%d after=%d", beforePresence, core.presenceCalls)
+		if afterPresence <= beforePresence {
+			t.Fatalf("presence should continue during geo refresh, before=%d after=%d", beforePresence, afterPresence)
 		}
 		close(release)
 		synctest.Wait()

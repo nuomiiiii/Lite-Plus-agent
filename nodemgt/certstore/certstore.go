@@ -29,6 +29,7 @@ type binding struct {
 	CertPath string
 	KeyPath  string
 	LastFP   string
+	LastErr  string
 }
 
 type FileInfo struct {
@@ -49,14 +50,61 @@ func Open(dir string) (*Store, error) {
 }
 
 func fileKey(domain string) string {
-	d := strings.ToLower(strings.TrimSpace(domain))
+	key, err := validateDomainKey(domain)
+	if err != nil {
+		return ""
+	}
+	return key
+}
+
+func validateDomainKey(domain string) (string, error) {
+	raw := strings.TrimSpace(domain)
+	if raw == "" {
+		return "", fmt.Errorf("invalid domain: empty")
+	}
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c <= 0x20 || c >= 0x7f || c == '/' || c == '\\' || c == ':' {
+			return "", fmt.Errorf("invalid domain %q", domain)
+		}
+	}
+	if strings.Contains(raw, "..") {
+		return "", fmt.Errorf("invalid domain %q", domain)
+	}
+	d := strings.ToLower(raw)
 	d = strings.TrimSuffix(d, ".")
 	d = strings.TrimPrefix(d, "*.")
-	d = strings.ReplaceAll(d, "*", "_")
-	if d == "" {
-		return "cert"
+	if d == "" || len(d) > 253 || strings.Contains(d, "*") {
+		return "", fmt.Errorf("invalid domain %q", domain)
 	}
-	return d
+	labels := strings.Split(d, ".")
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return "", fmt.Errorf("invalid domain %q", domain)
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("invalid domain %q", domain)
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+				return "", fmt.Errorf("invalid domain %q", domain)
+			}
+		}
+	}
+	return d, nil
+}
+
+func (s *Store) safeStorePath(filename string) (string, error) {
+	base := filepath.Clean(s.dir)
+	target := filepath.Join(base, filename)
+	rel, err := filepath.Rel(base, target)
+	if err != nil || rel == "." || rel == ".." ||
+		strings.HasPrefix(rel, ".."+string(filepath.Separator)) ||
+		filepath.Dir(rel) != "." {
+		return "", fmt.Errorf("unsafe certificate path %q", filename)
+	}
+	return target, nil
 }
 
 func uniqueDNS(names []string) []string {
@@ -92,13 +140,25 @@ func commonName(names []string) string {
 func (s *Store) GenerateCSR(domain string, names ...string) (keyPEM, csrPEM string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	keyName := fileKey(domain)
+	keyName, err := validateDomainKey(domain)
+	if err != nil {
+		return "", "", err
+	}
+	keyNextPath, err := s.safeStorePath(keyName + ".key.next")
+	if err != nil {
+		return "", "", err
+	}
 	dnsNames := uniqueDNS(names)
 	if len(dnsNames) == 0 {
 		dnsNames = uniqueDNS([]string{domain})
 	}
 	if len(dnsNames) == 0 {
 		return "", "", fmt.Errorf("domain required")
+	}
+	for _, n := range dnsNames {
+		if _, err := validateDomainKey(n); err != nil {
+			return "", "", err
+		}
 	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -111,7 +171,7 @@ func (s *Store) GenerateCSR(domain string, names ...string) (keyPEM, csrPEM stri
 		return "", "", err
 	}
 	csrPEMBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-	if err := os.WriteFile(filepath.Join(s.dir, keyName+".key.next"), keyPEMBytes, 0o600); err != nil {
+	if err := os.WriteFile(keyNextPath, keyPEMBytes, 0o600); err != nil {
 		return "", "", err
 	}
 	return string(keyPEMBytes), string(csrPEMBytes), nil
@@ -124,11 +184,26 @@ func (s *Store) SaveChain(domain, chainPEM string) error {
 func (s *Store) SaveChainKey(domain, chainPEM, keyPEM string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	keyName := fileKey(domain)
-	crtNext := filepath.Join(s.dir, keyName+".crt.next")
-	keyNext := filepath.Join(s.dir, keyName+".key.next")
-	crtLive := filepath.Join(s.dir, keyName+".crt")
-	keyLive := filepath.Join(s.dir, keyName+".key")
+	keyName, err := validateDomainKey(domain)
+	if err != nil {
+		return err
+	}
+	crtNext, err := s.safeStorePath(keyName + ".crt.next")
+	if err != nil {
+		return err
+	}
+	keyNext, err := s.safeStorePath(keyName + ".key.next")
+	if err != nil {
+		return err
+	}
+	crtLive, err := s.safeStorePath(keyName + ".crt")
+	if err != nil {
+		return err
+	}
+	keyLive, err := s.safeStorePath(keyName + ".key")
+	if err != nil {
+		return err
+	}
 	if strings.TrimSpace(keyPEM) != "" {
 		if err := os.WriteFile(keyNext, []byte(keyPEM), 0o600); err != nil {
 			return err
@@ -173,13 +248,21 @@ func (s *Store) BindFile(id, domain, certPath, keyPath string) {
 	if s.files == nil {
 		s.files = map[string]binding{}
 	}
+	id = strings.TrimSpace(id)
 	prev := s.files[domain]
+	lastFP := prev.LastFP
+	lastErr := prev.LastErr
+	if prev.CertPath != certPath || prev.KeyPath != keyPath || prev.ID != id {
+		lastFP = ""
+		lastErr = ""
+	}
 	s.files[domain] = binding{
-		ID:       strings.TrimSpace(id),
+		ID:       id,
 		Domain:   domain,
 		CertPath: certPath,
 		KeyPath:  keyPath,
-		LastFP:   prev.LastFP,
+		LastFP:   lastFP,
+		LastErr:  lastErr,
 	}
 }
 
@@ -205,6 +288,22 @@ func (s *Store) RememberFingerprint(domain, fp string) {
 		return
 	}
 	b.LastFP = fp
+	b.LastErr = ""
+	s.files[domain] = b
+}
+
+func (s *Store) RememberError(domain, errMsg string) {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.files[domain]
+	if !ok {
+		return
+	}
+	b.LastErr = errMsg
 	s.files[domain] = b
 }
 
@@ -221,21 +320,21 @@ func (s *Store) InspectFiles() []FileInfo {
 		certPEM, err := os.ReadFile(b.CertPath)
 		if err != nil {
 			info.Err = err
-			info.Changed = true
+			info.Changed = b.LastErr != err.Error()
 			out = append(out, info)
 			continue
 		}
 		keyPEM, err := os.ReadFile(b.KeyPath)
 		if err != nil {
 			info.Err = err
-			info.Changed = true
+			info.Changed = b.LastErr != err.Error()
 			out = append(out, info)
 			continue
 		}
 		fp, issuer, notAfter, err := parseLeaf(certPEM, keyPEM)
 		if err != nil {
 			info.Err = err
-			info.Changed = true
+			info.Changed = b.LastErr != err.Error()
 			out = append(out, info)
 			continue
 		}
@@ -260,12 +359,23 @@ func (s *Store) PEM(domain string) (certPEM, keyPEM []byte, err error) {
 		keyPEM, err = os.ReadFile(b.KeyPath)
 		return certPEM, keyPEM, err
 	}
-	keyName := fileKey(domain)
-	certPEM, err = os.ReadFile(filepath.Join(s.dir, keyName+".crt"))
+	keyName, err := validateDomainKey(domain)
 	if err != nil {
 		return nil, nil, err
 	}
-	keyPEM, err = os.ReadFile(filepath.Join(s.dir, keyName+".key"))
+	crtPath, err := s.safeStorePath(keyName + ".crt")
+	if err != nil {
+		return nil, nil, err
+	}
+	keyPath, err := s.safeStorePath(keyName + ".key")
+	if err != nil {
+		return nil, nil, err
+	}
+	certPEM, err = os.ReadFile(crtPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyPEM, err = os.ReadFile(keyPath)
 	return certPEM, keyPEM, err
 }
 

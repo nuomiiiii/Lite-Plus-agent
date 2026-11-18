@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,21 +23,52 @@ import (
 )
 
 type Runtime struct {
-	mu       sync.Mutex
-	dir      string
-	certs    *certstore.Store
-	geo      *geostore.Store
-	cores    []coreadapter.Core
-	users    []coreadapter.UserSpec
-	denied   map[string]struct{}
-	lastSnap json.RawMessage
-	ops      opLog
-	quota    *quota.Ledger
-	cancel   context.CancelFunc
-	result   func(method string, params any)
-	sender   func(method string, params any) error
-	geoBusy  atomic.Bool
+	opMu          sync.Mutex
+	mu            sync.Mutex
+	dir           string
+	certs         *certstore.Store
+	geo           *geostore.Store
+	cores         []coreadapter.Core
+	users         []coreadapter.UserSpec
+	denied        map[string]struct{}
+	expiredDenied map[string]struct{}
+	quotaDenied   map[string]struct{}
+	usageSync     map[string]*userUsageSync
+	lastSnap      json.RawMessage
+	ops           opLog
+	quota         *quota.Ledger
+	cancel        context.CancelFunc
+	result        func(method string, params any)
+	sender        func(method string, params any) error
+	geoBusy       atomic.Bool
 }
+
+type sentUsageBatch struct {
+	BatchID string    `json:"batch_id"`
+	Bytes   int64     `json:"bytes"`
+	SentAt  time.Time `json:"sent_at"`
+}
+
+type userUsageSync struct {
+	BaseUsed   int64            `json:"base_used"`
+	ResetCycle string           `json:"reset_cycle"`
+	InFlight   []sentUsageBatch `json:"in_flight"`
+}
+
+const maxSentUsageRetention = 30 * time.Minute
+
+func usageDedupOpID(nodeUUID, batchID, userID string) string {
+	sum := sha256.Sum256([]byte("usage:" + strings.TrimSpace(nodeUUID) + ":" + strings.TrimSpace(batchID) + ":" + strings.TrimSpace(userID)))
+	return hex.EncodeToString(sum[:])
+}
+
+type snapshotMode int
+
+const (
+	snapApplyConfig snapshotMode = iota
+	snapSyncQuota
+	snapInternalReload
+)
 
 type opLog struct {
 	LatestSeq    int            `json:"latest_seq"`
@@ -68,6 +100,7 @@ func mergeUsageItems(snaps []coreadapter.Snapshot) []struct {
 		}
 		byUser[snap.UserID] += snap.Bytes
 	}
+	sort.Strings(order)
 	items := make([]struct {
 		UserID string `json:"user_id"`
 		Bytes  int64  `json:"bytes"`
@@ -98,21 +131,26 @@ func Start(configFile string, result func(method string, params any)) (*Runtime,
 	_ = os.MkdirAll(dir, 0o700)
 	ctx, cancel := context.WithCancel(context.Background())
 	rt := &Runtime{
-		dir:    dir,
-		certs:  certs,
-		geo:    geo,
-		cores:  coreadapter.All(),
-		denied: map[string]struct{}{},
-		quota:  quota.New(),
-		ops:    opLog{Applied: map[string]int{}},
-		cancel: cancel,
-		result: result,
+		dir:           dir,
+		certs:         certs,
+		geo:           geo,
+		cores:         coreadapter.All(),
+		denied:        map[string]struct{}{},
+		expiredDenied: map[string]struct{}{},
+		quotaDenied:   map[string]struct{}{},
+		usageSync:     map[string]*userUsageSync{},
+		quota:         quota.New(),
+		ops:           opLog{Applied: map[string]int{}},
+		cancel:        cancel,
+		result:        result,
 	}
 	global = rt
 	log.Printf("Lite-Plus Agent cores: xray %s linked=%v; sing-box %s linked=%v",
 		coreadapter.XrayVersion, rt.cores[0].Linked(),
 		coreadapter.SingBoxVersion, rt.cores[1].Linked())
 	rt.loadDenied()
+	rt.loadExpired()
+	rt.loadQuotaDenied()
 	rt.loadOps()
 	if err := rt.restore(); err != nil && !os.IsNotExist(err) {
 		log.Printf("nodemgt restore: %v", err)
@@ -190,6 +228,8 @@ func (r *Runtime) refreshGeo(ctx context.Context) {
 }
 
 func (r *Runtime) HandleControl(params any, eventID string) bool {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
 	raw, _ := json.Marshal(params)
 	var cmd struct {
 		OperationID string          `json:"operation_id"`
@@ -239,32 +279,12 @@ func (r *Runtime) HandleControl(params any, eventID string) bool {
 		} else if _, got, err := r.certs.TLSConfig(p.Domain); err == nil {
 			fp = got
 			if snap := r.currentSnapshot(); len(snap) > 0 {
-				if err := r.applySnapshot(snap, true); err != nil {
+				if err := r.applySnapshotModeLocked(snap, snapInternalReload); err != nil {
 					status, lastErr = "failed", err.Error()
 				}
 			}
 		} else {
 			status, lastErr = "failed", err.Error()
-		}
-	case "loadFileCert":
-		var p struct {
-			Domain   string `json:"domain"`
-			CertID   string `json:"cert_id"`
-			CertPath string `json:"cert_path"`
-			KeyPath  string `json:"key_path"`
-		}
-		_ = json.Unmarshal(cmd.Payload, &p)
-		r.certs.BindFile(p.CertID, p.Domain, p.CertPath, p.KeyPath)
-		if _, got, err := r.certs.TLSConfig(p.Domain); err != nil {
-			status, lastErr = "failed", err.Error()
-		} else {
-			fp = got
-			if snap := r.currentSnapshot(); len(snap) > 0 {
-				if err := r.applySnapshot(snap, true); err != nil {
-					status, lastErr = "failed", err.Error()
-				}
-			}
-			r.certs.BindFile(p.CertID, p.Domain, p.CertPath, p.KeyPath)
 		}
 	case "revokeUser":
 		var p struct {
@@ -286,19 +306,33 @@ func (r *Runtime) HandleControl(params any, eventID string) bool {
 		if firstErr != nil {
 			status, lastErr = "failed", firstErr.Error()
 		}
+	case "clearUserIPs":
+		var p struct {
+			UserIDs []string `json:"user_ids"`
+		}
+		_ = json.Unmarshal(cmd.Payload, &p)
+		for _, id := range p.UserIDs {
+			coreadapter.ClearUserIPs(id)
+			for _, core := range r.cores {
+				core.ClearUserIPs(id)
+			}
+		}
 	default:
 		if r.alreadyApplied(cmd.OperationID) {
 			break
 		}
-		keepDeny := cmd.Kind == "syncQuota"
-		if keepDeny && r.staleTarget(cmd.Payload) {
-			break
+		mode := snapApplyConfig
+		if cmd.Kind == "syncQuota" {
+			mode = snapSyncQuota
+			if r.staleTarget(cmd.Payload) {
+				break
+			}
 		}
-		if err := r.applySnapshot(cmd.Payload, keepDeny); err != nil {
+		if err := r.applySnapshotModeWithOpLocked(cmd.Payload, mode, cmd.OperationID); err != nil {
 			status, lastErr = "failed", err.Error()
 		} else {
 			r.noteApplied(cmd.OperationID)
-			if !keepDeny {
+			if mode == snapApplyConfig {
 				r.noteTarget(cmd.Payload)
 			}
 		}
@@ -312,15 +346,111 @@ func (r *Runtime) HandleControl(params any, eventID string) bool {
 			"event_id":     eventID,
 		})
 	}
-	if cmd.Kind == "applyConfig" || cmd.Kind == "applyCert" || cmd.Kind == "loadFileCert" {
+	if cmd.Kind == "applyConfig" || cmd.Kind == "applyCert" {
 		r.reportFileCerts(true)
 	}
 	return true
 }
 
 func (r *Runtime) applySnapshot(payload json.RawMessage, keepDeny bool) error {
+	if keepDeny {
+		return r.applySnapshotMode(payload, snapSyncQuota)
+	}
+	return r.applySnapshotMode(payload, snapApplyConfig)
+}
+
+func (r *Runtime) applySnapshotMode(payload json.RawMessage, mode snapshotMode) error {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	return r.applySnapshotModeLocked(payload, mode)
+}
+
+func (r *Runtime) applySnapshotModeLocked(payload json.RawMessage, mode snapshotMode) error {
+	return r.applySnapshotModeWithOpLocked(payload, mode, "")
+}
+
+func (r *Runtime) reconcileMasterUsedLocked(nodeUUID string, ackedOps map[string]struct{}, opID string, mode snapshotMode, userID string, masterUsed int64, resetCycle string, now time.Time) int64 {
+	if r.usageSync == nil {
+		r.usageSync = map[string]*userUsageSync{}
+	}
+	st := r.usageSync[userID]
+	if st == nil {
+		r.usageSync[userID] = &userUsageSync{
+			BaseUsed:   masterUsed,
+			ResetCycle: resetCycle,
+		}
+		return masterUsed
+	}
+	cutoff := now.Add(-maxSentUsageRetention)
+	pruned := st.InFlight[:0]
+	for _, b := range st.InFlight {
+		if b.Bytes > 0 && (b.SentAt.IsZero() || b.SentAt.After(cutoff)) {
+			pruned = append(pruned, b)
+		}
+	}
+	st.InFlight = pruned
+
+	if strings.TrimSpace(nodeUUID) != "" {
+		kept := st.InFlight[:0]
+		var unconfirmed int64
+		for _, b := range st.InFlight {
+			if _, ok := ackedOps[usageDedupOpID(nodeUUID, b.BatchID, userID)]; ok {
+				continue
+			}
+			kept = append(kept, b)
+			unconfirmed += b.Bytes
+		}
+		st.InFlight = kept
+		st.BaseUsed = masterUsed
+		st.ResetCycle = resetCycle
+		return masterUsed + unconfirmed
+	}
+
+	if mode == snapInternalReload {
+		var unconfirmed int64
+		for _, b := range st.InFlight {
+			unconfirmed += b.Bytes
+		}
+		return masterUsed + unconfirmed
+	}
+
+	cycleChanged := resetCycle != "" && resetCycle != st.ResetCycle
+	resetOp := strings.HasPrefix(strings.TrimSpace(opID), "traffic-reset:")
+	rolledBack := masterUsed < st.BaseUsed
+	if cycleChanged || resetOp || rolledBack {
+		st.InFlight = nil
+		st.BaseUsed = masterUsed
+		st.ResetCycle = resetCycle
+		return masterUsed
+	}
+
+	delta := masterUsed - st.BaseUsed
+	rem := delta
+	kept := st.InFlight[:0]
+	var unconfirmed int64
+	for _, b := range st.InFlight {
+		if rem >= b.Bytes {
+			rem -= b.Bytes
+			continue
+		}
+		if rem > 0 {
+			b.Bytes -= rem
+			rem = 0
+		}
+		kept = append(kept, b)
+		unconfirmed += b.Bytes
+	}
+	st.InFlight = kept
+	st.BaseUsed = masterUsed
+	st.ResetCycle = resetCycle
+	return masterUsed + unconfirmed
+}
+
+func (r *Runtime) applySnapshotModeWithOpLocked(payload json.RawMessage, mode snapshotMode, opID string) error {
 	var snap struct {
-		Inbounds []struct {
+		NodeUUID      string   `json:"node_uuid"`
+		AckedUsageOps []string `json:"acked_usage_ops"`
+		Inbounds      []struct {
 			ID           string `json:"id"`
 			Core         string `json:"core"`
 			Listen       string `json:"listen"`
@@ -345,17 +475,18 @@ func (r *Runtime) applySnapshot(payload json.RawMessage, keepDeny bool) error {
 			Enabled  bool   `json:"enabled"`
 		} `json:"routes"`
 		Users []struct {
-			ID           string     `json:"id"`
-			Username     string     `json:"username"`
-			Status       string     `json:"status"`
-			QuotaBytes   int64      `json:"quota_bytes"`
-			UsedBytes    int64      `json:"used_bytes"`
-			RateLimitBps int64      `json:"rate_limit_bps"`
-			DeviceLimit  int        `json:"device_limit"`
-			Flow         string     `json:"flow"`
-			ExpiresAt    *time.Time `json:"expires_at"`
-			InboundIDs   []string   `json:"inbound_ids"`
-			Credentials  []struct {
+			ID                string     `json:"id"`
+			Username          string     `json:"username"`
+			Status            string     `json:"status"`
+			QuotaBytes        int64      `json:"quota_bytes"`
+			UsedBytes         int64      `json:"used_bytes"`
+			TrafficResetCycle string     `json:"traffic_reset_cycle"`
+			RateLimitBps      int64      `json:"rate_limit_bps"`
+			DeviceLimit       int        `json:"device_limit"`
+			Flow              string     `json:"flow"`
+			ExpiresAt         *time.Time `json:"expires_at"`
+			InboundIDs        []string   `json:"inbound_ids"`
+			Credentials       []struct {
 				UUID      string     `json:"uuid"`
 				Secret    string     `json:"secret"`
 				Enabled   bool       `json:"enabled"`
@@ -375,21 +506,36 @@ func (r *Runtime) applySnapshot(payload json.RawMessage, keepDeny bool) error {
 	if err := json.Unmarshal(payload, &snap); err != nil {
 		return err
 	}
+	ackedOps := make(map[string]struct{}, len(snap.AckedUsageOps))
+	for _, op := range snap.AckedUsageOps {
+		if op != "" {
+			ackedOps[op] = struct{}{}
+		}
+	}
 	now := time.Now().UTC()
-	r.mu.Lock()
-	denied := cloneDenied(r.denied)
-	r.mu.Unlock()
 	var users []coreadapter.UserSpec
+	r.mu.Lock()
+	if r.denied == nil {
+		r.denied = map[string]struct{}{}
+	}
+	if r.expiredDenied == nil {
+		r.expiredDenied = map[string]struct{}{}
+	}
+	if r.quotaDenied == nil {
+		r.quotaDenied = map[string]struct{}{}
+	}
 	for _, u := range snap.Users {
+		effectiveMasterUsed := r.reconcileMasterUsedLocked(snap.NodeUUID, ackedOps, opID, mode, u.ID, u.UsedBytes, u.TrafficResetCycle, now)
+		expiredNow := u.Status == "expired" || (u.ExpiresAt != nil && !u.ExpiresAt.After(now))
 		spec := coreadapter.UserSpec{
 			ID:           u.ID,
 			Username:     strings.TrimSpace(u.Username),
 			QuotaBytes:   u.QuotaBytes,
-			UsedBytes:    u.UsedBytes,
+			UsedBytes:    effectiveMasterUsed,
 			RateLimitBps: u.RateLimitBps,
 			DeviceLimit:  u.DeviceLimit,
-			Disabled:     u.Status == "disabled",
-			Expired:      u.Status == "expired",
+			Disabled:     u.Status == "disabled" || expiredNow,
+			Expired:      expiredNow,
 			Flow:         u.Flow,
 			ExpiresAt:    u.ExpiresAt,
 			InboundIDs:   append([]string(nil), u.InboundIDs...),
@@ -415,19 +561,40 @@ func (r *Runtime) applySnapshot(payload json.RawMessage, keepDeny bool) error {
 		if spec.UUID == "" && spec.Password == "" {
 			continue
 		}
-		if _, ok := denied[spec.ID]; ok {
-			if keepDeny || spec.Disabled || spec.Expired {
+		if _, ok := r.expiredDenied[spec.ID]; ok {
+			if mode == snapInternalReload || spec.Disabled || spec.Expired {
+				spec.Expired = true
 				spec.Disabled = true
 			} else {
-				delete(denied, spec.ID)
+				delete(r.expiredDenied, spec.ID)
 			}
+		} else if spec.Expired {
+			r.expiredDenied[spec.ID] = struct{}{}
+		}
+		if _, ok := r.denied[spec.ID]; ok {
+			if mode != snapApplyConfig || spec.Disabled || spec.Expired {
+				spec.Disabled = true
+			} else {
+				delete(r.denied, spec.ID)
+			}
+		}
+		hasQuotaRoom := spec.QuotaBytes <= 0 || spec.UsedBytes < spec.QuotaBytes
+		if _, ok := r.quotaDenied[spec.ID]; ok {
+			if mode == snapInternalReload {
+				spec.Disabled = true
+			} else if !spec.Disabled && !spec.Expired && hasQuotaRoom {
+				delete(r.quotaDenied, spec.ID)
+			} else {
+				spec.Disabled = true
+			}
+		} else if !hasQuotaRoom {
+			r.quotaDenied[spec.ID] = struct{}{}
+			spec.Disabled = true
 		}
 		users = append(users, spec)
 		r.quota.Configure(spec.ID, spec.QuotaBytes, spec.UsedBytes)
 	}
-	r.mu.Lock()
 	r.users = users
-	r.denied = denied
 	r.mu.Unlock()
 	certsByID := map[string]string{}
 	keepFiles := map[string]struct{}{}
@@ -498,7 +665,11 @@ func (r *Runtime) applySnapshot(payload json.RawMessage, keepDeny bool) error {
 		}); ok {
 			setter.SetDialStack(snap.DialStack)
 		}
-		if err := core.ApplyUsers(users); err != nil && firstErr == nil {
+		if stager, ok := core.(interface {
+			StageUsers([]coreadapter.UserSpec)
+		}); ok {
+			stager.StageUsers(users)
+		} else if err := core.ApplyUsers(users); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		if err := core.Start(ctx, inbounds); err != nil {
@@ -516,6 +687,12 @@ func (r *Runtime) applySnapshot(payload json.RawMessage, keepDeny bool) error {
 		return err
 	}
 	if err := r.writeDenied(); err != nil {
+		return err
+	}
+	if err := r.writeExpired(); err != nil {
+		return err
+	}
+	if err := r.writeQuotaDenied(); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -560,6 +737,8 @@ func (r *Runtime) currentSnapshot() json.RawMessage {
 }
 
 func (r *Runtime) reloadRenewedFileCerts() {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
 	infos := r.certs.InspectFiles()
 	needReload := false
 	for _, info := range infos {
@@ -570,7 +749,7 @@ func (r *Runtime) reloadRenewedFileCerts() {
 	}
 	if needReload {
 		if snap := r.currentSnapshot(); len(snap) > 0 {
-			if err := r.applySnapshot(snap, true); err != nil {
+			if err := r.applySnapshotModeLocked(snap, snapInternalReload); err != nil {
 				log.Printf("nodemgt file cert reload: %v", err)
 			}
 		}
@@ -587,7 +766,7 @@ func (r *Runtime) reportFileCertInfos(infos []certstore.FileInfo, all bool) {
 		return
 	}
 	for _, info := range infos {
-		if !all && !info.Changed && info.Err == nil {
+		if !all && !info.Changed {
 			continue
 		}
 		status, lastErr := "applied", ""
@@ -608,27 +787,40 @@ func (r *Runtime) reportFileCertInfos(infos []certstore.FileInfo, all bool) {
 			params["issuer"] = info.Issuer
 		}
 		r.result(v2.MethodNodemgtControlResult, params)
-		if info.Err == nil && info.Fingerprint != "" {
+		if info.Err != nil {
+			r.certs.RememberError(info.Domain, info.Err.Error())
+		} else if info.Fingerprint != "" {
 			r.certs.RememberFingerprint(info.Domain, info.Fingerprint)
 		}
 	}
 }
 
 func (r *Runtime) restore() error {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
 	raw, err := os.ReadFile(r.snapshotPath())
 	if err != nil {
 		return err
 	}
-	return r.applySnapshot(raw, true)
+	if err := r.applySnapshotModeLocked(raw, snapInternalReload); err != nil {
+		return err
+	}
+	for _, info := range r.certs.InspectFiles() {
+		if info.Err == nil && info.Fingerprint != "" {
+			r.certs.RememberFingerprint(info.Domain, info.Fingerprint)
+		}
+	}
+	return nil
 }
 
 func (r *Runtime) expireUsers() {
-	r.mu.Lock()
-	users := append([]coreadapter.UserSpec(nil), r.users...)
-	r.mu.Unlock()
 	now := time.Now().UTC()
 	var ids []string
-	for i, u := range users {
+	r.mu.Lock()
+	if r.expiredDenied == nil {
+		r.expiredDenied = map[string]struct{}{}
+	}
+	for i, u := range r.users {
 		due := false
 		if u.ExpiresAt != nil && !u.ExpiresAt.After(now) {
 			due = true
@@ -639,20 +831,146 @@ func (r *Runtime) expireUsers() {
 		if !due || u.Disabled || u.Expired {
 			continue
 		}
-		users[i].Disabled = true
-		users[i].Expired = true
+		r.users[i].Disabled = true
+		r.users[i].Expired = true
+		r.expiredDenied[u.ID] = struct{}{}
 		ids = append(ids, u.ID)
 	}
+	r.mu.Unlock()
 	if len(ids) == 0 {
 		return
 	}
-	r.mu.Lock()
-	r.users = users
-	r.mu.Unlock()
-	_ = r.persistDeny(ids)
+	_ = r.writeExpired()
 	for _, core := range r.cores {
 		for _, id := range ids {
 			_ = core.CloseUserSessions(id)
+		}
+	}
+}
+
+func (r *Runtime) commitSentUsageItem(batchID string, item struct {
+	UserID string `json:"user_id"`
+	Bytes  int64  `json:"bytes"`
+}) {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+
+	r.mu.Lock()
+	if r.usageSync == nil {
+		r.usageSync = map[string]*userUsageSync{}
+	}
+	st := r.usageSync[item.UserID]
+	if st == nil {
+		var base int64
+		for i := range r.users {
+			if r.users[i].ID == item.UserID {
+				base = r.users[i].UsedBytes
+				break
+			}
+		}
+		st = &userUsageSync{BaseUsed: base}
+		r.usageSync[item.UserID] = st
+	}
+	st.InFlight = append(st.InFlight, sentUsageBatch{
+		BatchID: batchID,
+		Bytes:   item.Bytes,
+		SentAt:  time.Now().UTC(),
+	})
+	r.mu.Unlock()
+
+	r.ackUsageItem(item.UserID, item.Bytes)
+	r.applyFlushedUsageItem(item)
+}
+
+func (r *Runtime) ackUsageItem(userID string, bytes int64) {
+	rem := bytes
+	for _, core := range r.cores {
+		if rem <= 0 {
+			break
+		}
+		if acker, ok := core.(interface {
+			AcknowledgeUsageItem(string, int64) int64
+		}); ok {
+			rem -= acker.AcknowledgeUsageItem(userID, rem)
+		}
+	}
+}
+
+func (r *Runtime) applyFlushedUsageItem(item struct {
+	UserID string `json:"user_id"`
+	Bytes  int64  `json:"bytes"`
+}) {
+	var exhausted bool
+	r.mu.Lock()
+	if r.quotaDenied == nil {
+		r.quotaDenied = map[string]struct{}{}
+	}
+	found := false
+	for i := range r.users {
+		if r.users[i].ID == item.UserID {
+			found = true
+			r.users[i].UsedBytes += item.Bytes
+			limit := r.users[i].QuotaBytes
+			r.quota.Configure(item.UserID, limit, r.users[i].UsedBytes)
+			if limit > 0 && r.users[i].UsedBytes >= limit {
+				r.users[i].Disabled = true
+				r.quotaDenied[item.UserID] = struct{}{}
+				exhausted = true
+			}
+		}
+	}
+	if !found {
+		used, limit, ok := r.quota.Add(item.UserID, item.Bytes)
+		if !ok || (limit > 0 && used >= limit) {
+			r.quotaDenied[item.UserID] = struct{}{}
+			exhausted = true
+		}
+	}
+	r.mu.Unlock()
+	if exhausted {
+		_ = r.writeQuotaDenied()
+		for _, core := range r.cores {
+			_ = core.CloseUserSessions(item.UserID)
+		}
+	}
+}
+
+func (r *Runtime) enforcePendingQuota(items []struct {
+	UserID string `json:"user_id"`
+	Bytes  int64  `json:"bytes"`
+}) {
+	if len(items) == 0 {
+		return
+	}
+	var exhaustedIDs []string
+	r.mu.Lock()
+	if r.quotaDenied == nil {
+		r.quotaDenied = map[string]struct{}{}
+	}
+	for _, item := range items {
+		if item.UserID == "" || item.Bytes <= 0 {
+			continue
+		}
+		for i := range r.users {
+			if r.users[i].ID == item.UserID {
+				limit := r.users[i].QuotaBytes
+				if limit > 0 && r.users[i].UsedBytes+item.Bytes >= limit {
+					r.users[i].Disabled = true
+					if _, already := r.quotaDenied[item.UserID]; !already {
+						r.quotaDenied[item.UserID] = struct{}{}
+						exhaustedIDs = append(exhaustedIDs, item.UserID)
+					}
+				}
+			}
+		}
+	}
+	r.mu.Unlock()
+	if len(exhaustedIDs) > 0 {
+		_ = r.writeQuotaDenied()
+		for _, id := range exhaustedIDs {
+			for _, core := range r.cores {
+				_ = core.CloseUserSessions(id)
+			}
 		}
 	}
 }
@@ -683,8 +1001,9 @@ func (r *Runtime) FlushUsage() {
 			return
 		}
 	}
-	send := r.sender
+	r.enforcePendingQuota(pending.Items)
 	r.mu.Lock()
+	send := r.sender
 	result := r.result
 	if send == nil && result != nil {
 		send = func(method string, params any) error {
@@ -693,47 +1012,49 @@ func (r *Runtime) FlushUsage() {
 		}
 	}
 	r.mu.Unlock()
-	if send != nil {
-		for _, item := range pending.Items {
+	sentCount := 0
+	var sendErr error
+	for _, item := range pending.Items {
+		if send != nil {
 			if err := send(v2.MethodNodemgtUsage, map[string]any{
 				"user_id":  item.UserID,
 				"bytes":    item.Bytes,
 				"batch_id": pending.BatchID,
 			}); err != nil {
-				log.Printf("nodemgt usage send: %v", err)
-				return
+				sendErr = err
+				break
 			}
 		}
+		r.commitSentUsageItem(pending.BatchID, item)
+		sentCount++
+	}
+	if sendErr != nil {
+		log.Printf("nodemgt usage send: %v", sendErr)
+		if sentCount > 0 {
+			pending.Items = append([]struct {
+				UserID string `json:"user_id"`
+				Bytes  int64  `json:"bytes"`
+			}(nil), pending.Items[sentCount:]...)
+			if raw, err := json.Marshal(pending); err == nil {
+				_ = atomicWrite(r.pendingUsagePath(), raw)
+			}
+		}
+		return
 	}
 	r.flushPresence()
 	for _, core := range r.cores {
-		core.AcknowledgeUsage()
+		if _, ok := core.(interface {
+			AcknowledgeUsageItem(string, int64) int64
+		}); !ok {
+			core.AcknowledgeUsage()
+		}
 	}
 	_ = os.Remove(r.pendingUsagePath())
-	for _, item := range pending.Items {
-		used, limit, ok := r.quota.Add(item.UserID, item.Bytes)
-		r.mu.Lock()
-		for i := range r.users {
-			if r.users[i].ID == item.UserID {
-				r.users[i].UsedBytes = used
-				if !ok {
-					r.users[i].Disabled = true
-				}
-			}
-		}
-		r.mu.Unlock()
-		if !ok || (limit > 0 && used >= limit) {
-			_ = r.persistDeny([]string{item.UserID})
-			for _, core := range r.cores {
-				_ = core.CloseUserSessions(item.UserID)
-			}
-		}
-	}
 }
 
 func (r *Runtime) flushPresence() {
-	send := r.sender
 	r.mu.Lock()
+	send := r.sender
 	result := r.result
 	if send == nil && result != nil {
 		send = func(method string, params any) error {
@@ -948,12 +1269,66 @@ func (r *Runtime) loadDenied() {
 	}
 }
 
-func cloneDenied(in map[string]struct{}) map[string]struct{} {
-	out := map[string]struct{}{}
-	for k, v := range in {
-		out[k] = v
+func (r *Runtime) writeExpired() error {
+	r.mu.Lock()
+	ids := make([]string, 0, len(r.expiredDenied))
+	for id := range r.expiredDenied {
+		ids = append(ids, id)
 	}
-	return out
+	r.mu.Unlock()
+	raw, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(r.dir, "expired.json"), raw)
+}
+
+func (r *Runtime) loadExpired() {
+	raw, err := os.ReadFile(filepath.Join(r.dir, "expired.json"))
+	if err != nil {
+		return
+	}
+	var ids []string
+	if json.Unmarshal(raw, &ids) != nil {
+		return
+	}
+	r.expiredDenied = map[string]struct{}{}
+	for _, id := range ids {
+		if id != "" {
+			r.expiredDenied[id] = struct{}{}
+		}
+	}
+}
+
+func (r *Runtime) writeQuotaDenied() error {
+	r.mu.Lock()
+	ids := make([]string, 0, len(r.quotaDenied))
+	for id := range r.quotaDenied {
+		ids = append(ids, id)
+	}
+	r.mu.Unlock()
+	raw, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(r.dir, "quota-denied.json"), raw)
+}
+
+func (r *Runtime) loadQuotaDenied() {
+	raw, err := os.ReadFile(filepath.Join(r.dir, "quota-denied.json"))
+	if err != nil {
+		return
+	}
+	var ids []string
+	if json.Unmarshal(raw, &ids) != nil {
+		return
+	}
+	r.quotaDenied = map[string]struct{}{}
+	for _, id := range ids {
+		if id != "" {
+			r.quotaDenied[id] = struct{}{}
+		}
+	}
 }
 
 func atomicWrite(path string, data []byte) error {
