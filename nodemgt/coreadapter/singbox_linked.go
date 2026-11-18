@@ -889,7 +889,7 @@ func singBoxProxyOutbound(row OutboundSpec, tag string, tags map[string]string) 
 			item["transport"] = transport
 		}
 	}
-	if tls := singBoxOutboundTLS(settings); tls != nil {
+	if tls := singBoxOutboundTLSForProto(proto, settings); tls != nil {
 		item["tls"] = tls
 	}
 	return item
@@ -970,6 +970,10 @@ func singBoxRulePorts(raw string) (ports []int, ranges []string) {
 }
 
 func singBoxOutboundTLS(settings map[string]any) map[string]any {
+	return singBoxOutboundTLSForProto("", settings)
+}
+
+func singBoxOutboundTLSForProto(proto string, settings map[string]any) map[string]any {
 	if settings == nil {
 		return nil
 	}
@@ -981,18 +985,21 @@ func singBoxOutboundTLS(settings map[string]any) map[string]any {
 	if sni := strings.TrimSpace(firstString(settings["sni"])); sni != "" {
 		tls["server_name"] = sni
 	}
-	fp := strings.TrimSpace(firstString(settings["fingerprint"]))
-	if fp == "" && security == "reality" {
-		fp = "chrome"
-	}
-	if fp != "" {
-		tls["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
+	quicProto := strings.EqualFold(proto, "hysteria2") || strings.EqualFold(proto, "tuic")
+	if !quicProto {
+		fp := strings.TrimSpace(firstString(settings["fingerprint"]))
+		if fp == "" && security == "reality" {
+			fp = "chrome"
+		}
+		if fp != "" {
+			tls["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
+		}
 	}
 	if insecure, ok := settings["insecure"].(bool); ok && insecure {
 		tls["insecure"] = true
 	}
-	if alpn := strings.TrimSpace(firstString(settings["alpn"])); alpn != "" {
-		tls["alpn"] = strings.Split(alpn, ",")
+	if alpn := splitCSV(firstString(settings["alpn"])); len(alpn) > 0 {
+		tls["alpn"] = alpn
 	}
 	if security == "reality" {
 		reality := map[string]any{"enabled": true}
